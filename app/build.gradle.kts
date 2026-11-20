@@ -23,11 +23,11 @@ android {
         }
     }
 
-    // GitHub Actions Secrets 기반 Release 서명 설정 (미설정 시 Debug 빌드에 영향 없음)
-    val keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
-    val keystorePassword = System.getenv("KEYSTORE_PASSWORD")
-    val keyAliasName = System.getenv("KEY_ALIAS")
-    val keyPasswordValue = System.getenv("KEY_PASSWORD")
+    // GitHub Actions Secrets 기반 Release 서명 설정 (앞뒤 공백/개행 자동 제거, 미설정 시 Debug 빌드에 영향 없음)
+    val keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")?.trim()
+    val keystorePassword = System.getenv("KEYSTORE_PASSWORD")?.trim()
+    val keyAliasName = System.getenv("KEY_ALIAS")?.trim()
+    val keyPasswordValue = System.getenv("KEY_PASSWORD")?.trim()
     val hasReleaseSigning = !keystorePath.isNullOrBlank() &&
         !keystorePassword.isNullOrBlank() &&
         !keyAliasName.isNullOrBlank() &&
