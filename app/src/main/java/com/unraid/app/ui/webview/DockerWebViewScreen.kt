@@ -30,11 +30,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -58,7 +58,6 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -130,7 +129,7 @@ fun FullScreenDockerWebView(
 
         // 우측 가장자리 플로팅 버튼의 Y 위치 (기본값: 화면 세로 약 42% 지점, 드래그로 자유롭게 이동 가능)
         var handleOffsetY by rememberSaveable(maxHeightPx) {
-            mutableFloatStateOf((maxHeightPx * 0.42f).coerceIn(minY, maxY))
+            mutableStateOf((maxHeightPx * 0.42f).coerceIn(minY, maxY))
         }
 
         // 100% 전체 화면 캐싱 WebView
@@ -723,7 +722,7 @@ private fun LauncherServiceCard(
             Spacer(modifier = Modifier.width(8.dp))
 
             Icon(
-                imageVector = Icons.Filled.OpenInNew,
+                imageVector = Icons.AutoMirrored.Filled.OpenInNew,
                 contentDescription = "전체 화면 열기",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(20.dp)
