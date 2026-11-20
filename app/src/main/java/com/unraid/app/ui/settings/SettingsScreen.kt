@@ -1,8 +1,13 @@
 package com.unraid.app.ui.settings
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -26,10 +31,13 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material.icons.filled.VpnKey
+import androidx.compose.material.icons.filled.VpnLock
 import androidx.compose.material.icons.filled.WifiFind
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -37,12 +45,14 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -72,15 +82,20 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unraid.app.BuildConfig
+import com.unraid.app.data.model.ConnectionMode
 import com.unraid.app.data.model.DockerServiceBookmark
 import com.unraid.app.data.model.ErrorLogEntry
+import com.unraid.app.data.model.RoutePhase
+import com.unraid.app.ui.theme.StatusAmber
+import com.unraid.app.ui.theme.StatusBlue
 import com.unraid.app.ui.theme.StatusGreen
 import com.unraid.app.ui.theme.StatusRed
 
 /**
  * 설정 및 자체 에러 로그 화면.
- * - Unraid 서버 URL, API 키 입력/저장 및 연결 테스트
- * - 도커 웹뷰 목록(이름, URL) 추가/수정/삭제
+ * - Unraid 서버 URL, API 키 입력/저장, 자체 서명 SSL 허용, 연결 테스트
+ * - 내장 Tailscale(tsnet) Auth Key, 홈 Wi-Fi 자동 전환 모드 및 현재 Wi-Fi 등록
+ * - 도커 웹뷰 목록 수동 추가/수정/삭제
  * - 자체 에러 로그 확인 및 클립보드 원클릭 복사
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -92,17 +107,28 @@ fun SettingsScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val dockerServices by viewModel.dockerServices.collectAsStateWithLifecycle()
     val errorLogs by viewModel.errorLogs.collectAsStateWithLifecycle()
-    val proxyConfig by viewModel.proxyConfig.collectAsStateWithLifecycle()
     val allowSelfSignedSsl by viewModel.allowSelfSignedSsl.collectAsStateWithLifecycle()
+    val connectionMode by viewModel.connectionMode.collectAsStateWithLifecycle()
+    val connectionStatus by viewModel.connectionStatus.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
 
     var showApiKey by remember { mutableStateOf(false) }
+    var showTsAuthKey by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
     var editingService by remember { mutableStateOf<DockerServiceBookmark?>(null) }
     var deletingService by remember { mutableStateOf<DockerServiceBookmark?>(null) }
+    var showResetTsDialog by remember { mutableStateOf(false) }
     var showErrorLogsDialog by remember { mutableStateOf(false) }
+
+    // Android 10+ Wi-Fi SSID 감지를 위한 위치 권한 요청 런처
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        val fineGranted = grants[Manifest.permission.ACCESS_FINE_LOCATION] == true
+        viewModel.onLocationPermissionResult(fineGranted)
+    }
 
     LaunchedEffect(uiState.feedbackMessage) {
         val message = uiState.feedbackMessage
@@ -154,8 +180,8 @@ fun SettingsScreen(
                         OutlinedTextField(
                             value = uiState.serverUrlInput,
                             onValueChange = viewModel::onServerUrlChanged,
-                            label = { Text("Unraid 서버 URL") },
-                            placeholder = { Text("예: http://192.168.0.10") },
+                            label = { Text("기본 Unraid 서버 URL (홈 Wi-Fi용)") },
+                            placeholder = { Text("예: https://192.168.0.10") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -296,7 +322,274 @@ fun SettingsScreen(
                 }
             }
 
-            // 2. 도커 웹뷰 목록 관리 카드
+            // 2. Tailscale(tsnet) 내장 및 홈 Wi-Fi 자동 전환 카드
+            item(key = "tailscale_auto_switch_card") {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Filled.VpnLock,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Tailscale 및 자동 전환",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                        }
+
+                        // 실시간 연결 상태 요약 패널
+                        val statusColor = when (connectionStatus.phase) {
+                            RoutePhase.DIRECT_HOME_WIFI -> StatusGreen
+                            RoutePhase.DIRECT_MANUAL -> StatusBlue
+                            RoutePhase.TAILSCALE_CONNECTING -> StatusAmber
+                            RoutePhase.TAILSCALE_CONNECTED -> MaterialTheme.colorScheme.primary
+                            RoutePhase.TAILSCALE_ERROR -> StatusRed
+                        }
+                        Surface(
+                            color = statusColor.copy(alpha = 0.12f),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, statusColor.copy(alpha = 0.35f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    if (connectionStatus.phase == RoutePhase.TAILSCALE_CONNECTING) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.dp,
+                                            color = statusColor
+                                        )
+                                    }
+                                    Text(
+                                        text = "현재 경로: ${connectionStatus.badgeLabel}",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = statusColor
+                                    )
+                                }
+                                Text(
+                                    text = "상태: ${connectionStatus.tailscaleDetail}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                val wifiInfoLine = when {
+                                    !connectionStatus.isOnWifi -> "현재 네트워크: 모바일 데이터 (LTE/5G) 또는 비 Wi-Fi"
+                                    !connectionStatus.currentWifiSsid.isNullOrBlank() ->
+                                        "현재 Wi-Fi: ${connectionStatus.currentWifiSsid}"
+                                    !connectionStatus.hasLocationPermission ->
+                                        "현재 Wi-Fi: 감지 대기 (아래 '현재 Wi-Fi 등록'으로 위치 권한 허용 필요)"
+                                    else -> "현재 Wi-Fi: 이름 확인 불가 (기기 위치/GPS 켜짐 여부 확인)"
+                                }
+                                Text(
+                                    text = wifiInfoLine,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (!connectionStatus.lastError.isNullOrBlank()) {
+                                    Text(
+                                        text = "오류: ${connectionStatus.lastError}",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = StatusRed
+                                    )
+                                }
+                            }
+                        }
+
+                        // 연결 모드 선택 (자동 전환 / 항상 직접 연결 / 항상 Tailscale)
+                        Text(
+                            text = "연결 모드",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            ConnectionMode.entries.forEach { mode ->
+                                val selected = connectionMode == mode
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (selected) {
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceVariant
+                                    },
+                                    border = if (selected) {
+                                        BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                                    } else {
+                                        null
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { viewModel.onConnectionModeSelected(mode) }
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        RadioButton(
+                                            selected = selected,
+                                            onClick = { viewModel.onConnectionModeSelected(mode) }
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = mode.labelKo,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                            Text(
+                                                text = mode.descriptionKo,
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+
+                        // 홈 Wi-Fi SSID 입력 + 현재 Wi-Fi 등록 버튼
+                        OutlinedTextField(
+                            value = uiState.homeWifiSsidInput,
+                            onValueChange = viewModel::onHomeWifiSsidChanged,
+                            label = { Text("홈 Wi-Fi 이름 (SSID)") },
+                            placeholder = { Text("예: MyHome_5G") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        FilledTonalButton(
+                            onClick = {
+                                if (viewModel.hasLocationPermission()) {
+                                    viewModel.registerCurrentWifiSsid()
+                                } else {
+                                    locationPermissionLauncher.launch(
+                                        arrayOf(
+                                            Manifest.permission.ACCESS_FINE_LOCATION,
+                                            Manifest.permission.ACCESS_COARSE_LOCATION
+                                        )
+                                    )
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.MyLocation,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("현재 Wi-Fi 등록 (위치 권한 확인)")
+                        }
+
+                        // Tailscale Auth Key 입력 (EncryptedSharedPreferences 암호화 보관)
+                        OutlinedTextField(
+                            value = uiState.tailscaleAuthKeyInput,
+                            onValueChange = viewModel::onTailscaleAuthKeyChanged,
+                            label = { Text("Tailscale Auth Key (암호화 보관)") },
+                            placeholder = { Text("tskey-auth-...") },
+                            singleLine = true,
+                            visualTransformation = if (showTsAuthKey) {
+                                VisualTransformation.None
+                            } else {
+                                PasswordVisualTransformation()
+                            },
+                            trailingIcon = {
+                                IconButton(onClick = { showTsAuthKey = !showTsAuthKey }) {
+                                    Icon(
+                                        imageVector = if (showTsAuthKey) {
+                                            Icons.Filled.VisibilityOff
+                                        } else {
+                                            Icons.Filled.Visibility
+                                        },
+                                        contentDescription = "Auth Key 표시 전환"
+                                    )
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        // 외부(Tailscale)용 Unraid URL (선택 입력)
+                        OutlinedTextField(
+                            value = uiState.tailscaleServerUrlInput,
+                            onValueChange = viewModel::onTailscaleServerUrlChanged,
+                            label = { Text("Tailscale용 Unraid URL (선택)") },
+                            placeholder = { Text("비워두면 기본 Unraid URL 그대로 사용") },
+                            supportingText = {
+                                Text("서브넷 라우터를 사용 중이면 비워두고, Tailscale IP/MagicDNS로 접속할 때만 입력하세요.")
+                            },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Button(
+                            onClick = viewModel::saveTailscaleSettings,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Save,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Tailscale 설정 저장")
+                        }
+
+                        // 수동 재연결 / 상태 초기화 버튼
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = viewModel::reconnectTailscale,
+                                enabled = connectionStatus.phase != RoutePhase.TAILSCALE_CONNECTING,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Refresh,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("수동 재연결")
+                            }
+
+                            OutlinedButton(
+                                onClick = { showResetTsDialog = true },
+                                enabled = connectionStatus.phase != RoutePhase.TAILSCALE_CONNECTING,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.RestartAlt,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                    tint = StatusRed
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("상태 초기화", color = StatusRed)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. 도커 웹뷰 목록 관리 카드
             item(key = "docker_services_card") {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -391,7 +684,7 @@ fun SettingsScreen(
                 }
             }
 
-            // 3. 자체 에러 로그 및 디버깅 카드
+            // 4. 자체 에러 로그 및 디버깅 카드
             item(key = "error_log_card") {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -440,7 +733,7 @@ fun SettingsScreen(
                         }
 
                         Text(
-                            text = "API 오류, GraphQL 스키마 오류, 웹뷰 오류 및 앱 내부 예외가 자동 기록됩니다. 문제 발생 시 로그를 복사해 바로 원인을 확인할 수 있습니다.",
+                            text = "API 오류, 웹뷰 오류, 위치 권한 누락 및 내장 Tailscale(tsnet) 시작 실패 로그가 자동 기록됩니다.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -479,40 +772,23 @@ fun SettingsScreen(
                 }
             }
 
-            // 4. 2단계(Tailscale tsnet) 대비 네트워크 레이어 상태 및 앱 정보
-            item(key = "network_info_card") {
+            // 5. 앱 버전 정보
+            item(key = "app_version_card") {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                     shape = RoundedCornerShape(16.dp)
                 ) {
                     Column(
                         modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Filled.VpnKey,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.secondary,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "네트워크 프록시 상태 (2단계 tsnet 대비)",
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                        }
                         Text(
-                            text = if (proxyConfig.isActive) {
-                                "활성 프록시: ${proxyConfig.toWebViewProxyRule()} (OkHttp + WebView 일괄 적용)"
-                            } else {
-                                "현재 모드: 직접 연결 (2단계 Tailscale tsnet 로컬 프록시 주입 준비 완료)"
-                            },
+                            text = "Unraid Hub · v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            text = "앱 버전: v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})",
+                            text = "내장 Tailscale(tsnet arm64) + 홈 Wi-Fi 자동 전환 지원",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -574,6 +850,34 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { deletingService = null }) {
+                    Text("취소")
+                }
+            }
+        )
+    }
+
+    // Tailscale 상태 초기화 확인 다이얼로그
+    if (showResetTsDialog) {
+        AlertDialog(
+            onDismissRequest = { showResetTsDialog = false },
+            title = { Text("Tailscale 상태 초기화") },
+            text = {
+                Text(
+                    "앱 내부에 저장된 Tailscale 노드 키와 상태를 모두 삭제합니다. 이후 재연결하려면 유효한 Auth Key가 필요합니다. 계속할까요?"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showResetTsDialog = false
+                        viewModel.resetTailscaleState()
+                    }
+                ) {
+                    Text("초기화", color = StatusRed)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetTsDialog = false }) {
                     Text("취소")
                 }
             }

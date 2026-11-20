@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.unraid.app.data.model.ConnectionMode
 import com.unraid.app.data.model.DockerServiceBookmark
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -60,11 +61,51 @@ class AppPreferencesRepository(private val context: Context) {
         prefs[KEY_ALLOW_SELF_SIGNED_SSL] ?: true
     }
 
+    /**
+     * 네트워크 연결 모드 (자동 전환 / 항상 직접 연결 / 항상 Tailscale)
+     */
+    val connectionModeFlow: Flow<ConnectionMode> = context.appDataStore.data.map { prefs ->
+        ConnectionMode.fromStorageKey(prefs[KEY_CONNECTION_MODE])
+    }
+
+    /**
+     * 직접 연결에 사용할 홈 Wi-Fi SSID
+     */
+    val homeWifiSsidFlow: Flow<String> = context.appDataStore.data.map { prefs ->
+        prefs[KEY_HOME_WIFI_SSID].orEmpty()
+    }
+
+    /**
+     * 외부(Tailscale) 접속용 Unraid URL (비워두면 기본 Unraid URL 그대로 사용)
+     */
+    val tailscaleServerUrlFlow: Flow<String> = context.appDataStore.data.map { prefs ->
+        prefs[KEY_TAILSCALE_SERVER_URL].orEmpty()
+    }
+
     suspend fun getUnraidServerUrl(): String = unraidServerUrlFlow.first()
 
     suspend fun setAllowSelfSignedSsl(enabled: Boolean) {
         context.appDataStore.edit { prefs ->
             prefs[KEY_ALLOW_SELF_SIGNED_SSL] = enabled
+        }
+    }
+
+    suspend fun setConnectionMode(mode: ConnectionMode) {
+        context.appDataStore.edit { prefs ->
+            prefs[KEY_CONNECTION_MODE] = mode.storageKey
+        }
+    }
+
+    suspend fun saveHomeWifiSsid(ssid: String) {
+        context.appDataStore.edit { prefs ->
+            prefs[KEY_HOME_WIFI_SSID] = ssid.trim()
+        }
+    }
+
+    suspend fun saveTailscaleServerUrl(url: String) {
+        val normalized = normalizeUrl(url)
+        context.appDataStore.edit { prefs ->
+            prefs[KEY_TAILSCALE_SERVER_URL] = normalized
         }
     }
 
@@ -129,6 +170,9 @@ class AppPreferencesRepository(private val context: Context) {
         private val KEY_DOCKER_SERVICES_JSON = stringPreferencesKey("docker_services_json")
         private val KEY_SELECTED_SERVICE_ID = stringPreferencesKey("selected_service_id")
         private val KEY_ALLOW_SELF_SIGNED_SSL = booleanPreferencesKey("allow_self_signed_ssl")
+        private val KEY_CONNECTION_MODE = stringPreferencesKey("connection_mode")
+        private val KEY_HOME_WIFI_SSID = stringPreferencesKey("home_wifi_ssid")
+        private val KEY_TAILSCALE_SERVER_URL = stringPreferencesKey("tailscale_server_url")
 
         /**
          * 입력된 서버 URL에 스킴이 없으면 http:// 를 보정하고 끝의 불필요한 슬래시를 정리합니다.

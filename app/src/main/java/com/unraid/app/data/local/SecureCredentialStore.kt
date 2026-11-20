@@ -20,12 +20,23 @@ class SecureCredentialStore(context: Context) {
     private val _apiKeyFlow = MutableStateFlow(prefs.getString(KEY_UNRAID_API_KEY, "").orEmpty())
     val apiKeyFlow: StateFlow<String> = _apiKeyFlow.asStateFlow()
 
+    private val _tailscaleAuthKeyFlow = MutableStateFlow(prefs.getString(KEY_TAILSCALE_AUTH_KEY, "").orEmpty())
+    val tailscaleAuthKeyFlow: StateFlow<String> = _tailscaleAuthKeyFlow.asStateFlow()
+
     fun getUnraidApiKey(): String = _apiKeyFlow.value
 
     fun saveUnraidApiKey(apiKey: String) {
         val trimmed = apiKey.trim()
         prefs.edit().putString(KEY_UNRAID_API_KEY, trimmed).apply()
         _apiKeyFlow.value = trimmed
+    }
+
+    fun getTailscaleAuthKey(): String = _tailscaleAuthKeyFlow.value
+
+    fun saveTailscaleAuthKey(authKey: String) {
+        val trimmed = authKey.trim()
+        prefs.edit().putString(KEY_TAILSCALE_AUTH_KEY, trimmed).apply()
+        _tailscaleAuthKeyFlow.value = trimmed
     }
 
     private fun createEncryptedPrefs(appContext: Context): SharedPreferences {
@@ -75,5 +86,6 @@ class SecureCredentialStore(context: Context) {
         private const val PREFS_FILE_NAME = "unraid_secure_credentials"
         private const val FALLBACK_PREFS_NAME = "unraid_credentials_fallback"
         private const val KEY_UNRAID_API_KEY = "unraid_api_key"
+        private const val KEY_TAILSCALE_AUTH_KEY = "tailscale_auth_key"
     }
 }

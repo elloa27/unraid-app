@@ -5,10 +5,14 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.unraid.app.data.local.AppPreferencesRepository
 import com.unraid.app.data.local.SecureCredentialStore
+import com.unraid.app.data.model.ConnectionStatus
 import com.unraid.app.data.model.DockerAction
 import com.unraid.app.data.model.DockerContainerItem
+import com.unraid.app.data.model.RoutePhase
 import com.unraid.app.data.model.UnraidDashboardData
+import com.unraid.app.data.model.resolveEffectiveUnraidUrl
 import com.unraid.app.data.remote.UnraidGraphQlClient
+import com.unraid.app.network.TailscaleConnectionManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,6 +23,7 @@ import kotlinx.coroutines.launch
 data class DashboardUiState(
     val isConfigured: Boolean = false,
     val serverUrl: String = "",
+    val connectionStatus: ConnectionStatus = ConnectionStatus(),
     val isLoading: Boolean = false,
     val isRefreshing: Boolean = false,
     val data: UnraidDashboardData? = null,
@@ -28,50 +33,63 @@ data class DashboardUiState(
 )
 
 /**
- * Unraid 네이티브 대시보드 상태 및 도커 컨테이너 제어 ViewModel.
+ * Unraid 네이티브 대시보드 상태, 도커 컨테이너 제어 및
+ * 홈 Wi-Fi / Tailscale 경로 전환에 따른 URL 자동 반영을 관리하는 ViewModel.
  */
 class DashboardViewModel(
     private val preferencesRepository: AppPreferencesRepository,
     private val credentialStore: SecureCredentialStore,
-    private val graphQlClient: UnraidGraphQlClient
+    private val graphQlClient: UnraidGraphQlClient,
+    private val connectionManager: TailscaleConnectionManager
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DashboardUiState())
     val uiState: StateFlow<DashboardUiState> = _uiState.asStateFlow()
 
-    private var currentServerUrl: String = ""
+    private var currentEffectiveUrl: String = ""
     private var currentApiKey: String = ""
-    private var hasAutoLoadedForConfig: String = ""
+    private var lastAutoLoadedSignature: String = ""
 
     init {
         viewModelScope.launch {
             combine(
                 preferencesRepository.unraidServerUrlFlow,
-                credentialStore.apiKeyFlow
-            ) { url, key -> url to key }
-                .collect { (url, key) ->
-                    currentServerUrl = url
-                    currentApiKey = key
-                    val configured = url.isNotBlank() && key.isNotBlank()
-                    _uiState.update {
-                        it.copy(
-                            isConfigured = configured,
-                            serverUrl = url,
-                            errorMessage = if (!configured) null else it.errorMessage
-                        )
-                    }
-
-                    val configKey = "$url|$key"
-                    if (configured && hasAutoLoadedForConfig != configKey) {
-                        hasAutoLoadedForConfig = configKey
-                        refresh(isPullToRefresh = false)
-                    }
+                preferencesRepository.tailscaleServerUrlFlow,
+                credentialStore.apiKeyFlow,
+                connectionManager.status
+            ) { homeUrl, tailscaleUrl, key, connStatus ->
+                val effectiveUrl = resolveEffectiveUnraidUrl(
+                    homeUrl = homeUrl,
+                    tailscaleUrl = tailscaleUrl,
+                    useTailscale = connStatus.isUsingTailscale
+                )
+                Quadruple(effectiveUrl, key, connStatus, homeUrl)
+            }.collect { (effectiveUrl, key, connStatus, _) ->
+                currentEffectiveUrl = effectiveUrl
+                currentApiKey = key
+                val configured = effectiveUrl.isNotBlank() && key.isNotBlank()
+                _uiState.update {
+                    it.copy(
+                        isConfigured = configured,
+                        serverUrl = effectiveUrl,
+                        connectionStatus = connStatus,
+                        errorMessage = if (!configured) null else it.errorMessage
+                    )
                 }
+
+                // Tailscale 연결 진행 중이 아닐 때 경로/URL/포트가 확정되면 자동 조회
+                val routeReady = connStatus.phase != RoutePhase.TAILSCALE_CONNECTING
+                val signature = "$effectiveUrl|$key|${connStatus.phase}|${connStatus.proxyPort}"
+                if (configured && routeReady && lastAutoLoadedSignature != signature) {
+                    lastAutoLoadedSignature = signature
+                    refresh(isPullToRefresh = false)
+                }
+            }
         }
     }
 
     fun refresh(isPullToRefresh: Boolean = true) {
-        if (currentServerUrl.isBlank() || currentApiKey.isBlank()) {
+        if (currentEffectiveUrl.isBlank() || currentApiKey.isBlank()) {
             _uiState.update {
                 it.copy(
                     isConfigured = false,
@@ -91,7 +109,7 @@ class DashboardViewModel(
                 )
             }
 
-            val result = graphQlClient.fetchDashboard(currentServerUrl, currentApiKey)
+            val result = graphQlClient.fetchDashboard(currentEffectiveUrl, currentApiKey)
             result.onSuccess { dashboardData ->
                 _uiState.update {
                     it.copy(
@@ -125,7 +143,7 @@ class DashboardViewModel(
             }
 
             val result = graphQlClient.controlDockerContainer(
-                serverUrl = currentServerUrl,
+                serverUrl = currentEffectiveUrl,
                 apiKey = currentApiKey,
                 containerId = container.id,
                 action = action
@@ -154,14 +172,27 @@ class DashboardViewModel(
         _uiState.update { it.copy(feedbackMessage = null) }
     }
 
+    private data class Quadruple<A, B, C, D>(
+        val first: A,
+        val second: B,
+        val third: C,
+        val fourth: D
+    )
+
     class Factory(
         private val preferencesRepository: AppPreferencesRepository,
         private val credentialStore: SecureCredentialStore,
-        private val graphQlClient: UnraidGraphQlClient
+        private val graphQlClient: UnraidGraphQlClient,
+        private val connectionManager: TailscaleConnectionManager
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return DashboardViewModel(preferencesRepository, credentialStore, graphQlClient) as T
+            return DashboardViewModel(
+                preferencesRepository,
+                credentialStore,
+                graphQlClient,
+                connectionManager
+            ) as T
         }
     }
 }

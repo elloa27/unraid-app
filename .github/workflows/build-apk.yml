@@ -24,12 +24,70 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Android SDK 라이선스 동의 확인
+      - name: Go 최신 안정 버전 설정
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: false
+
+      - name: Go 모듈 및 빌드 캐시
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-tsnet-${{ hashFiles('tsnet-bridge/go.mod', 'tsnet-bridge/*.go') }}
+          restore-keys: |
+            ${{ runner.os }}-go-tsnet-
+
+      - name: Android SDK 라이선스 동의 및 NDK 경로 확인
         shell: bash
         run: |
           if [ -n "${ANDROID_HOME:-}" ] && [ -x "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" ]; then
             yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
           fi
+
+          NDK_DIR=""
+          if [ -n "${ANDROID_NDK_LATEST_HOME:-}" ] && [ -d "${ANDROID_NDK_LATEST_HOME}" ]; then
+            NDK_DIR="${ANDROID_NDK_LATEST_HOME}"
+          elif [ -n "${ANDROID_NDK_HOME:-}" ] && [ -d "${ANDROID_NDK_HOME}" ]; then
+            NDK_DIR="${ANDROID_NDK_HOME}"
+          elif [ -n "${ANDROID_NDK_ROOT:-}" ] && [ -d "${ANDROID_NDK_ROOT}" ]; then
+            NDK_DIR="${ANDROID_NDK_ROOT}"
+          elif [ -n "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME}/ndk" ]; then
+            NDK_DIR="$(find "${ANDROID_HOME}/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          fi
+
+          if [ -z "$NDK_DIR" ]; then
+            echo "사전 설치된 NDK를 찾지 못해 sdkmanager로 NDK를 설치합니다."
+            "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018"
+            NDK_DIR="${ANDROID_HOME}/ndk/27.2.12479018"
+          fi
+
+          echo "사용할 Android NDK 경로: $NDK_DIR"
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+
+      - name: gomobile로 내장 Tailscale(tsnet) AAR 빌드 (arm64)
+        shell: bash
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          mkdir -p app/libs
+          cd tsnet-bridge
+          go get tailscale.com/tsnet@latest
+          go get github.com/wlynxg/anet@latest
+          go mod tidy
+          # go mod tidy 이후 gomobile bind가 요구하는 바인딩 런타임 패키지를 명시적으로 유지
+          go get golang.org/x/mobile/bind@latest
+
+          # tsnet-bridge와 동일한 Go 툴체인으로 gomobile/gobind 설치 및 초기화
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          gomobile init
+
+          gomobile bind -v -target=android/arm64 -androidapi 29 -javapkg=com.unraid.app -o ../app/libs/tsnetbridge.aar .
+          ls -lh ../app/libs/tsnetbridge.aar
 
       - name: Gradle 8.11.1 설정 (Wrapper 바이너리 불필요)
         uses: gradle/actions/setup-gradle@v4
@@ -72,7 +130,7 @@ jobs:
 
             echo "build_type=Release" >> "$GITHUB_OUTPUT"
             echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
-            echo "release_note=서명된 **Release APK** 빌드입니다." >> "$GITHUB_OUTPUT"
+            echo "release_note=서명된 **Release APK** 빌드입니다. (내장 Tailscale tsnet arm64 포함)" >> "$GITHUB_OUTPUT"
           else
             echo "서명 키(Secrets)가 설정되지 않았습니다. 즉시 설치 가능한 Debug APK를 빌드합니다."
             gradle assembleDebug --stacktrace
@@ -82,7 +140,7 @@ jobs:
 
             echo "build_type=Debug" >> "$GITHUB_OUTPUT"
             echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
-            echo "release_note=서명 키(Secrets) 미등록 상태이므로 **Debug APK**로 자동 빌드되었습니다." >> "$GITHUB_OUTPUT"
+            echo "release_note=서명 키(Secrets) 미등록 상태이므로 **Debug APK**로 자동 빌드되었습니다. (내장 Tailscale tsnet arm64 포함)" >> "$GITHUB_OUTPUT"
           fi
 
       - name: 빌드 산출물 아티팩트 백업 업로드

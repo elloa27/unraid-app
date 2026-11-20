@@ -29,7 +29,8 @@ class MainActivity : ComponentActivity() {
         DashboardViewModel.Factory(
             preferencesRepository = unraidApp.preferencesRepository,
             credentialStore = unraidApp.secureCredentialStore,
-            graphQlClient = unraidApp.unraidGraphQlClient
+            graphQlClient = unraidApp.unraidGraphQlClient,
+            connectionManager = unraidApp.tailscaleConnectionManager
         )
     }
 
@@ -37,7 +38,8 @@ class MainActivity : ComponentActivity() {
         SettingsViewModel.Factory(
             preferencesRepository = unraidApp.preferencesRepository,
             credentialStore = unraidApp.secureCredentialStore,
-            graphQlClient = unraidApp.unraidGraphQlClient
+            graphQlClient = unraidApp.unraidGraphQlClient,
+            connectionManager = unraidApp.tailscaleConnectionManager
         )
     }
 

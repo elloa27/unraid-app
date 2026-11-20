@@ -6,12 +6,15 @@ import androidx.lifecycle.viewModelScope
 import com.unraid.app.data.local.AppErrorLogger
 import com.unraid.app.data.local.AppPreferencesRepository
 import com.unraid.app.data.local.SecureCredentialStore
+import com.unraid.app.data.model.ConnectionMode
+import com.unraid.app.data.model.ConnectionStatus
 import com.unraid.app.data.model.DockerServiceBookmark
 import com.unraid.app.data.model.ErrorLogEntry
+import com.unraid.app.data.model.resolveEffectiveUnraidUrl
 import com.unraid.app.data.remote.UnraidGraphQlClient
-import com.unraid.app.network.LocalProxyConfig
 import com.unraid.app.network.NetworkModule
-import com.unraid.app.network.NetworkProxyManager
+import com.unraid.app.network.TailscaleConnectionManager
+import com.unraid.app.network.WifiSsidReadResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -30,18 +33,24 @@ data class ConnectionTestState(
 data class SettingsUiState(
     val serverUrlInput: String = "",
     val apiKeyInput: String = "",
+    val homeWifiSsidInput: String = "",
+    val tailscaleAuthKeyInput: String = "",
+    val tailscaleServerUrlInput: String = "",
     val connectionTest: ConnectionTestState = ConnectionTestState(),
     val feedbackMessage: String? = null
 )
 
 /**
  * 설정 및 자체 에러 로그 화면 ViewModel.
- * Unraid 서버 URL/API 키 저장, 연결 테스트, 도커 웹뷰 CRUD, 에러 로그 관리 기능을 제공합니다.
+ * - Unraid 서버 URL/API 키 저장, 자체 서명 SSL 허용, 연결 테스트
+ * - Tailscale(tsnet) Auth Key, 홈 Wi-Fi SSID 자동 감지 및 연결 모드 설정
+ * - 도커 웹뷰 목록 수동 CRUD, 자체 에러 로그 관리
  */
 class SettingsViewModel(
     private val preferencesRepository: AppPreferencesRepository,
     private val credentialStore: SecureCredentialStore,
-    private val graphQlClient: UnraidGraphQlClient
+    private val graphQlClient: UnraidGraphQlClient,
+    private val connectionManager: TailscaleConnectionManager
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -56,8 +65,6 @@ class SettingsViewModel(
 
     val errorLogs: StateFlow<List<ErrorLogEntry>> = AppErrorLogger.logs
 
-    val proxyConfig: StateFlow<LocalProxyConfig> = NetworkProxyManager.proxyConfig
-
     val allowSelfSignedSsl: StateFlow<Boolean> =
         preferencesRepository.allowSelfSignedSslFlow.stateIn(
             scope = viewModelScope,
@@ -65,14 +72,29 @@ class SettingsViewModel(
             initialValue = true
         )
 
+    val connectionMode: StateFlow<ConnectionMode> =
+        preferencesRepository.connectionModeFlow.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = ConnectionMode.AUTO
+        )
+
+    val connectionStatus: StateFlow<ConnectionStatus> = connectionManager.status
+
     init {
         viewModelScope.launch {
             val savedUrl = preferencesRepository.unraidServerUrlFlow.first()
             val savedKey = credentialStore.getUnraidApiKey()
+            val savedHomeSsid = preferencesRepository.homeWifiSsidFlow.first()
+            val savedTsKey = credentialStore.getTailscaleAuthKey()
+            val savedTsUrl = preferencesRepository.tailscaleServerUrlFlow.first()
             _uiState.update {
                 it.copy(
                     serverUrlInput = savedUrl,
-                    apiKeyInput = savedKey
+                    apiKeyInput = savedKey,
+                    homeWifiSsidInput = savedHomeSsid,
+                    tailscaleAuthKeyInput = savedTsKey,
+                    tailscaleServerUrlInput = savedTsUrl
                 )
             }
         }
@@ -96,8 +118,19 @@ class SettingsViewModel(
         }
     }
 
+    fun onHomeWifiSsidChanged(value: String) {
+        _uiState.update { it.copy(homeWifiSsidInput = value) }
+    }
+
+    fun onTailscaleAuthKeyChanged(value: String) {
+        _uiState.update { it.copy(tailscaleAuthKeyInput = value) }
+    }
+
+    fun onTailscaleServerUrlChanged(value: String) {
+        _uiState.update { it.copy(tailscaleServerUrlInput = value) }
+    }
+
     fun onAllowSelfSignedSslChanged(enabled: Boolean) {
-        // 연결 테스트 및 웹뷰에 즉시 반영되도록 네트워크 모듈과 저장소를 함께 갱신
         NetworkModule.setAllowSelfSignedSsl(enabled)
         viewModelScope.launch {
             preferencesRepository.setAllowSelfSignedSsl(enabled)
@@ -111,6 +144,15 @@ class SettingsViewModel(
                     "자체 서명 SSL 인증서 허용이 꺼졌습니다."
                 }
             )
+        }
+    }
+
+    fun onConnectionModeSelected(mode: ConnectionMode) {
+        viewModelScope.launch {
+            preferencesRepository.setConnectionMode(mode)
+        }
+        _uiState.update {
+            it.copy(feedbackMessage = "연결 모드를 '${mode.labelKo}'(으)로 변경했습니다.")
         }
     }
 
@@ -132,11 +174,103 @@ class SettingsViewModel(
         }
     }
 
-    fun testConnection() {
-        val rawUrl = _uiState.value.serverUrlInput.trim()
-        val rawKey = _uiState.value.apiKeyInput.trim()
+    fun saveTailscaleSettings() {
+        val ssid = _uiState.value.homeWifiSsidInput.trim()
+        val tsAuthKey = _uiState.value.tailscaleAuthKeyInput.trim()
+        val tsUrl = _uiState.value.tailscaleServerUrlInput.trim()
 
-        if (rawUrl.isBlank() || rawKey.isBlank()) {
+        viewModelScope.launch {
+            val normalizedTsUrl = AppPreferencesRepository.normalizeUrl(tsUrl)
+            preferencesRepository.saveHomeWifiSsid(ssid)
+            preferencesRepository.saveTailscaleServerUrl(normalizedTsUrl)
+            credentialStore.saveTailscaleAuthKey(tsAuthKey)
+            _uiState.update {
+                it.copy(
+                    homeWifiSsidInput = ssid,
+                    tailscaleAuthKeyInput = tsAuthKey,
+                    tailscaleServerUrlInput = normalizedTsUrl,
+                    feedbackMessage = "Tailscale 및 자동 전환 설정이 저장되었습니다."
+                )
+            }
+        }
+    }
+
+    fun hasLocationPermission(): Boolean = connectionManager.hasFineLocationPermission()
+
+    fun onLocationPermissionResult(granted: Boolean) {
+        connectionManager.onLocationPermissionUpdated()
+        if (granted) {
+            registerCurrentWifiSsid()
+        } else {
+            val msg = "위치 권한이 거부되어 현재 Wi-Fi 이름을 자동으로 읽을 수 없습니다. 직접 입력하거나 권한을 허용해 주세요."
+            AppErrorLogger.logError(tag = "WifiDetection", message = msg)
+            _uiState.update { it.copy(feedbackMessage = msg) }
+        }
+    }
+
+    fun registerCurrentWifiSsid() {
+        when (val result = connectionManager.readCurrentWifiSsid()) {
+            is WifiSsidReadResult.Success -> {
+                viewModelScope.launch {
+                    preferencesRepository.saveHomeWifiSsid(result.ssid)
+                }
+                _uiState.update {
+                    it.copy(
+                        homeWifiSsidInput = result.ssid,
+                        feedbackMessage = "현재 Wi-Fi '${result.ssid}'를 홈 Wi-Fi로 등록했습니다."
+                    )
+                }
+            }
+
+            WifiSsidReadResult.PermissionDenied -> {
+                _uiState.update {
+                    it.copy(feedbackMessage = "현재 Wi-Fi 이름을 읽으려면 위치 권한이 필요합니다.")
+                }
+            }
+
+            WifiSsidReadResult.LocationServiceDisabled -> {
+                _uiState.update {
+                    it.copy(feedbackMessage = "안드로이드 기기의 위치(GPS) 스위치를 켠 뒤 다시 시도해 주세요.")
+                }
+            }
+
+            WifiSsidReadResult.NotOnWifi -> {
+                _uiState.update {
+                    it.copy(feedbackMessage = "현재 Wi-Fi에 연결되어 있지 않습니다. 홈 Wi-Fi에 연결 후 눌러 주세요.")
+                }
+            }
+
+            WifiSsidReadResult.UnknownSsid -> {
+                _uiState.update {
+                    it.copy(feedbackMessage = "Wi-Fi 이름을 가져오지 못했습니다. 위치(GPS)가 켜져 있는지 확인하거나 직접 입력해 주세요.")
+                }
+            }
+        }
+    }
+
+    fun reconnectTailscale() {
+        connectionManager.reconnectNow()
+        _uiState.update { it.copy(feedbackMessage = "네트워크 경로 재연결을 시작합니다.") }
+    }
+
+    fun resetTailscaleState() {
+        connectionManager.resetTailscaleState()
+        _uiState.update { it.copy(feedbackMessage = "내장 Tailscale 상태를 초기화했습니다.") }
+    }
+
+    fun testConnection() {
+        val rawHomeUrl = _uiState.value.serverUrlInput.trim()
+        val rawTsUrl = _uiState.value.tailscaleServerUrlInput.trim()
+        val rawKey = _uiState.value.apiKeyInput.trim()
+        val useTailscale = connectionStatus.value.isUsingTailscale
+
+        val targetUrl = resolveEffectiveUnraidUrl(
+            homeUrl = rawHomeUrl,
+            tailscaleUrl = rawTsUrl,
+            useTailscale = useTailscale
+        )
+
+        if (targetUrl.isBlank() || rawKey.isBlank()) {
             _uiState.update {
                 it.copy(
                     connectionTest = ConnectionTestState(
@@ -155,19 +289,19 @@ class SettingsViewModel(
                     connectionTest = ConnectionTestState(
                         isTesting = true,
                         isSuccess = null,
-                        message = "서버 연결 확인 중..."
+                        message = "서버 연결 확인 중... ($targetUrl)"
                     )
                 )
             }
 
-            val result = graphQlClient.testConnection(rawUrl, rawKey)
+            val result = graphQlClient.testConnection(targetUrl, rawKey)
             result.onSuccess { successText ->
                 _uiState.update {
                     it.copy(
                         connectionTest = ConnectionTestState(
                             isTesting = false,
                             isSuccess = true,
-                            message = successText
+                            message = "$successText · 경로: ${connectionStatus.value.badgeLabel}"
                         )
                     )
                 }
@@ -226,11 +360,17 @@ class SettingsViewModel(
     class Factory(
         private val preferencesRepository: AppPreferencesRepository,
         private val credentialStore: SecureCredentialStore,
-        private val graphQlClient: UnraidGraphQlClient
+        private val graphQlClient: UnraidGraphQlClient,
+        private val connectionManager: TailscaleConnectionManager
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return SettingsViewModel(preferencesRepository, credentialStore, graphQlClient) as T
+            return SettingsViewModel(
+                preferencesRepository,
+                credentialStore,
+                graphQlClient,
+                connectionManager
+            ) as T
         }
     }
 }

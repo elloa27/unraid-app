@@ -6,6 +6,7 @@ import com.unraid.app.data.local.AppPreferencesRepository
 import com.unraid.app.data.local.SecureCredentialStore
 import com.unraid.app.data.remote.UnraidGraphQlClient
 import com.unraid.app.network.NetworkModule
+import com.unraid.app.network.TailscaleConnectionManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -13,7 +14,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 /**
- * 앱 전역 싱글톤 의존성과 에러 로거를 초기화하는 Application 클래스.
+ * 앱 전역 싱글톤 의존성, 에러 로거, 내장 Tailscale(tsnet) 자동 전환 엔진을 초기화하는 Application 클래스.
  */
 class UnraidApp : Application() {
 
@@ -28,6 +29,9 @@ class UnraidApp : Application() {
     lateinit var unraidGraphQlClient: UnraidGraphQlClient
         private set
 
+    lateinit var tailscaleConnectionManager: TailscaleConnectionManager
+        private set
+
     override fun onCreate() {
         super.onCreate()
         // 전역 에러 로거 및 미처리 예외 핸들러 최우선 초기화
@@ -36,6 +40,11 @@ class UnraidApp : Application() {
         preferencesRepository = AppPreferencesRepository(this)
         secureCredentialStore = SecureCredentialStore(this)
         unraidGraphQlClient = UnraidGraphQlClient { NetworkModule.okHttpClient }
+        tailscaleConnectionManager = TailscaleConnectionManager(
+            context = this,
+            preferencesRepository = preferencesRepository,
+            credentialStore = secureCredentialStore
+        )
 
         // 저장된 자체 서명 SSL 허용 옵션을 네트워크 레이어와 실시간 동기화
         appScope.launch {
@@ -43,5 +52,8 @@ class UnraidApp : Application() {
                 NetworkModule.setAllowSelfSignedSsl(enabled)
             }
         }
+
+        // 홈 Wi-Fi 감지 및 내장 Tailscale(tsnet) 자동 전환 엔진 시작
+        tailscaleConnectionManager.startMonitoring()
     }
 }

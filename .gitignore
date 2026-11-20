@@ -20,6 +20,8 @@ local.properties
 *.keystore
 keystore.properties
 release-output/
+app/libs/*.aar
+app/libs/*.jar
 
 # 기타 IDE / OS 임시 파일
 *.log

@@ -23,3 +23,7 @@
 -dontwarn javax.annotation.**
 -dontwarn org.conscrypt.**
 -keepnames class okhttp3.internal.publicsuffix.PublicSuffixDatabase
+
+# Gomobile / tsnet-bridge JNI 바인딩 유지
+-keep class go.** { *; }
+-keep class com.unraid.app.tsnetbridge.** { *; }

@@ -109,4 +109,7 @@ dependencies {
     implementation(libs.androidx.security.crypto)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
+
+    // 2단계: gomobile로 빌드된 내장 Tailscale(tsnet) 안드로이드 브리지 라이브러리
+    implementation(files("libs/tsnetbridge.aar"))
 }

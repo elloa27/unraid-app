@@ -26,7 +26,9 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Thermostat
+import androidx.compose.material.icons.filled.VpnLock
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -60,8 +62,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.unraid.app.data.model.ConnectionStatus
 import com.unraid.app.data.model.DockerAction
 import com.unraid.app.data.model.DockerContainerItem
+import com.unraid.app.data.model.RoutePhase
 import com.unraid.app.data.model.UnraidDashboardData
 import com.unraid.app.data.model.UnraidDisk
 import com.unraid.app.ui.theme.StatusAmber
@@ -101,10 +105,19 @@ fun DashboardScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text(
-                            text = "Unraid 대시보드",
-                            style = MaterialTheme.typography.titleLarge
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "Unraid 대시보드",
+                                style = MaterialTheme.typography.titleLarge
+                            )
+                            ConnectionRouteBadge(
+                                status = state.connectionStatus,
+                                onClick = onNavigateToSettings
+                            )
+                        }
                         if (state.serverUrl.isNotBlank()) {
                             Text(
                                 text = state.serverUrl,
@@ -248,6 +261,60 @@ fun DashboardScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ConnectionRouteBadge(
+    status: ConnectionStatus,
+    onClick: () -> Unit
+) {
+    val badgeColor = when (status.phase) {
+        RoutePhase.DIRECT_HOME_WIFI -> StatusGreen
+        RoutePhase.DIRECT_MANUAL -> StatusBlue
+        RoutePhase.TAILSCALE_CONNECTING -> StatusAmber
+        RoutePhase.TAILSCALE_CONNECTED -> MaterialTheme.colorScheme.primary
+        RoutePhase.TAILSCALE_ERROR -> StatusRed
+    }
+
+    Surface(
+        onClick = onClick,
+        color = badgeColor.copy(alpha = 0.16f),
+        shape = RoundedCornerShape(999.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            if (status.phase == RoutePhase.TAILSCALE_CONNECTING) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(11.dp),
+                    strokeWidth = 1.6.dp,
+                    color = badgeColor
+                )
+            } else {
+                val icon = when (status.phase) {
+                    RoutePhase.DIRECT_HOME_WIFI, RoutePhase.DIRECT_MANUAL -> Icons.Filled.Wifi
+                    RoutePhase.TAILSCALE_CONNECTED -> Icons.Filled.VpnLock
+                    RoutePhase.TAILSCALE_ERROR -> Icons.Filled.Warning
+                    RoutePhase.TAILSCALE_CONNECTING -> Icons.Filled.VpnLock
+                }
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = badgeColor,
+                    modifier = Modifier.size(12.dp)
+                )
+            }
+            Text(
+                text = status.badgeLabel,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = badgeColor,
+                maxLines = 1
+            )
         }
     }
 }
