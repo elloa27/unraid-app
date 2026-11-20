@@ -29,7 +29,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
  * Unraid 버전에 따른 미세한 스키마 차이에도 안전하게 동작하도록 방어적 JSON 파싱을 수행합니다.
  */
 class UnraidGraphQlClient(
-    private val httpClient: OkHttpClient = NetworkModule.okHttpClient
+    private val httpClientProvider: () -> OkHttpClient = { NetworkModule.okHttpClient }
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -270,7 +270,7 @@ class UnraidGraphQlClient(
             .build()
 
         try {
-            httpClient.newCall(request).execute().use { response ->
+            httpClientProvider().newCall(request).execute().use { response ->
                 val bodyText = response.body?.string().orEmpty()
 
                 if (!response.isSuccessful) {

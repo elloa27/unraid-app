@@ -3,8 +3,10 @@ package com.unraid.app.ui.webview
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
+import android.net.http.SslError
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -13,6 +15,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.unraid.app.data.local.AppErrorLogger
 import com.unraid.app.data.model.DockerServiceBookmark
+import com.unraid.app.network.NetworkModule
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -134,6 +137,25 @@ class WebViewPoolManager {
                             message = "[${service.name}] 웹페이지 로드 실패 (${error?.errorCode}): ${error?.description}",
                             extraDetails = "요청 URL: ${request.url}"
                         )
+                    }
+                }
+
+                @SuppressLint("WebViewClientOnReceivedSslError")
+                override fun onReceivedSslError(
+                    view: WebView?,
+                    handler: SslErrorHandler?,
+                    error: SslError?
+                ) {
+                    if (NetworkModule.isSelfSignedSslAllowed()) {
+                        // 개인 NAS용 자체 서명 SSL 허용 옵션이 켜져 있으면 인증서 오류를 무시하고 진행
+                        handler?.proceed()
+                    } else {
+                        AppErrorLogger.logError(
+                            tag = "DockerWebViewSSL",
+                            message = "[${service.name}] SSL 인증서 검증 실패로 접속이 차단되었습니다.",
+                            extraDetails = "URL: ${error?.url ?: service.url}\n오류 코드: ${error?.primaryError}"
+                        )
+                        handler?.cancel()
                     }
                 }
             }

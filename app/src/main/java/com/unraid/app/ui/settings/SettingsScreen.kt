@@ -47,6 +47,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -92,6 +93,7 @@ fun SettingsScreen(
     val dockerServices by viewModel.dockerServices.collectAsStateWithLifecycle()
     val errorLogs by viewModel.errorLogs.collectAsStateWithLifecycle()
     val proxyConfig by viewModel.proxyConfig.collectAsStateWithLifecycle()
+    val allowSelfSignedSsl by viewModel.allowSelfSignedSsl.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
@@ -183,6 +185,36 @@ fun SettingsScreen(
                             },
                             modifier = Modifier.fillMaxWidth()
                         )
+
+                        // 개인 NAS 자체 서명 SSL 인증서 허용 스위치 (기본값 ON)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = 12.dp)
+                            ) {
+                                Text(
+                                    text = "자체 서명 SSL 인증서 허용 (개인 NAS용)",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "켜짐 상태에서는 Unraid API와 도커 웹뷰의 사설 HTTPS 인증서 오류를 무시하고 접속합니다.",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = allowSelfSignedSsl,
+                                onCheckedChange = viewModel::onAllowSelfSignedSslChanged
+                            )
+                        }
 
                         // 연결 테스트 결과 표시 영역
                         val testState = uiState.connectionTest

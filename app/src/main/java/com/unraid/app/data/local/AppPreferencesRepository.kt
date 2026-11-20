@@ -3,6 +3,7 @@ package com.unraid.app.data.local
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -52,7 +53,20 @@ class AppPreferencesRepository(private val context: Context) {
         prefs[KEY_SELECTED_SERVICE_ID]
     }
 
+    /**
+     * 개인 NAS 환경의 자체 서명(Self-signed) SSL 인증서 허용 여부 (기본값: ON)
+     */
+    val allowSelfSignedSslFlow: Flow<Boolean> = context.appDataStore.data.map { prefs ->
+        prefs[KEY_ALLOW_SELF_SIGNED_SSL] ?: true
+    }
+
     suspend fun getUnraidServerUrl(): String = unraidServerUrlFlow.first()
+
+    suspend fun setAllowSelfSignedSsl(enabled: Boolean) {
+        context.appDataStore.edit { prefs ->
+            prefs[KEY_ALLOW_SELF_SIGNED_SSL] = enabled
+        }
+    }
 
     suspend fun saveUnraidServerUrl(url: String) {
         val normalized = normalizeUrl(url)
@@ -114,6 +128,7 @@ class AppPreferencesRepository(private val context: Context) {
         private val KEY_UNRAID_SERVER_URL = stringPreferencesKey("unraid_server_url")
         private val KEY_DOCKER_SERVICES_JSON = stringPreferencesKey("docker_services_json")
         private val KEY_SELECTED_SERVICE_ID = stringPreferencesKey("selected_service_id")
+        private val KEY_ALLOW_SELF_SIGNED_SSL = booleanPreferencesKey("allow_self_signed_ssl")
 
         /**
          * 입력된 서버 URL에 스킴이 없으면 http:// 를 보정하고 끝의 불필요한 슬래시를 정리합니다.

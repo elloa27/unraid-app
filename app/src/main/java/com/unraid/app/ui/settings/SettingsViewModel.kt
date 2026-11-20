@@ -10,6 +10,7 @@ import com.unraid.app.data.model.DockerServiceBookmark
 import com.unraid.app.data.model.ErrorLogEntry
 import com.unraid.app.data.remote.UnraidGraphQlClient
 import com.unraid.app.network.LocalProxyConfig
+import com.unraid.app.network.NetworkModule
 import com.unraid.app.network.NetworkProxyManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -57,6 +58,13 @@ class SettingsViewModel(
 
     val proxyConfig: StateFlow<LocalProxyConfig> = NetworkProxyManager.proxyConfig
 
+    val allowSelfSignedSsl: StateFlow<Boolean> =
+        preferencesRepository.allowSelfSignedSslFlow.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = true
+        )
+
     init {
         viewModelScope.launch {
             val savedUrl = preferencesRepository.unraidServerUrlFlow.first()
@@ -84,6 +92,24 @@ class SettingsViewModel(
             it.copy(
                 apiKeyInput = value,
                 connectionTest = ConnectionTestState()
+            )
+        }
+    }
+
+    fun onAllowSelfSignedSslChanged(enabled: Boolean) {
+        // 연결 테스트 및 웹뷰에 즉시 반영되도록 네트워크 모듈과 저장소를 함께 갱신
+        NetworkModule.setAllowSelfSignedSsl(enabled)
+        viewModelScope.launch {
+            preferencesRepository.setAllowSelfSignedSsl(enabled)
+        }
+        _uiState.update {
+            it.copy(
+                connectionTest = ConnectionTestState(),
+                feedbackMessage = if (enabled) {
+                    "자체 서명 SSL 인증서 허용이 켜졌습니다."
+                } else {
+                    "자체 서명 SSL 인증서 허용이 꺼졌습니다."
+                }
             )
         }
     }
