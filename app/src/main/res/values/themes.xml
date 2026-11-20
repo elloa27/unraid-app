@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose 다크 모드와 자연스럽게 이어지는 기본 다크 스플래시/창 테마 -->
+    <style name="Theme.UnraidHub" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">#FF111318</item>
+    </style>
+</resources>

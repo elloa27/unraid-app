@@ -1,0 +1,27 @@
+# Android / Gradle 표준 .gitignore
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build/
+/app/build/
+/captures/
+.externalNativeBuild/
+.cxx/
+local.properties
+
+# 빌드 산출물 및 서명 키 (절대 커밋 금지)
+*.apk
+*.aab
+*.ap_
+*.dex
+*.jks
+*.keystore
+keystore.properties
+release-output/
+
+# 기타 IDE / OS 임시 파일
+*.log
+*.swp
+Thumbs.db

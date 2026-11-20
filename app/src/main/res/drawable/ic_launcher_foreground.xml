@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Unraid 스타일의 수직 어레이 바 모티프 런처 아이콘 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#F15A2C"
+        android:pathData="M28,44h6v20h-6z" />
+    <path
+        android:fillColor="#FF7A2F"
+        android:pathData="M39,34h6v40h-6z" />
+    <path
+        android:fillColor="#FF9633"
+        android:pathData="M51,28h6v52h-6z" />
+    <path
+        android:fillColor="#FF7A2F"
+        android:pathData="M63,34h6v40h-6z" />
+    <path
+        android:fillColor="#F15A2C"
+        android:pathData="M74,44h6v20h-6z" />
+</vector>

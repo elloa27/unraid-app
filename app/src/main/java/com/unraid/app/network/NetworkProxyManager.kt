@@ -1,0 +1,144 @@
+package com.unraid.app.network
+
+import androidx.webkit.ProxyConfig
+import androidx.webkit.ProxyController
+import androidx.webkit.WebViewFeature
+import com.unraid.app.data.local.AppErrorLogger
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.io.IOException
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.net.ProxySelector
+import java.net.SocketAddress
+import java.net.URI
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+
+/**
+ * 앱 전체(OkHttp + Android WebView)의 프록시 라우팅을 중앙에서 일원화하여 관리하는 매니저.
+ *
+ * [2단계 Tailscale tsnet 연동 가이드]
+ * 2단계에서 tsnet 로컬 프록시 리스너가 기동되면 아래 메서드 한 줄만 호출하면 됩니다:
+ *   NetworkProxyManager.enableLocalProxy(port = tsnetPort, scheme = LocalProxyScheme.HTTP)
+ * 이후 모든 OkHttp GraphQL 요청과 도커 WebView 트래픽이 자동으로 127.0.0.1:<포트> 를 경유합니다.
+ */
+object NetworkProxyManager {
+
+    private val _proxyConfig = MutableStateFlow(LocalProxyConfig.DISABLED)
+    val proxyConfig: StateFlow<LocalProxyConfig> = _proxyConfig.asStateFlow()
+
+    private val proxyExecutor: Executor = Executors.newSingleThreadExecutor()
+    private var onProxyChangedListener: (() -> Unit)? = null
+
+    /**
+     * OkHttpClient 에 주입되는 동적 ProxySelector.
+     * 매 요청 시 현재 활성화된 LocalProxyConfig를 참조하므로 클라이언트 재생성 없이 즉시 전환됩니다.
+     */
+    val okHttpProxySelector: ProxySelector = object : ProxySelector() {
+        override fun select(uri: URI?): List<Proxy> {
+            val current = _proxyConfig.value
+            if (!current.isActive) {
+                return listOf(Proxy.NO_PROXY)
+            }
+
+            // 로컬 루프백 자기 자신 호출은 프록시 루프를 방지하기 위해 우회
+            val host = uri?.host.orEmpty()
+            if (host.equals("127.0.0.1", ignoreCase = true) ||
+                host.equals("localhost", ignoreCase = true)
+            ) {
+                return listOf(Proxy.NO_PROXY)
+            }
+
+            val address = InetSocketAddress.createUnresolved(current.host, current.port)
+            return listOf(Proxy(current.toJavaProxyType(), address))
+        }
+
+        override fun connectFailed(uri: URI?, sa: SocketAddress?, ioe: IOException?) {
+            AppErrorLogger.logError(
+                tag = "NetworkProxy",
+                message = "프록시 연결 실패 (대상: ${uri ?: "알 수 없음"}, 프록시: ${sa ?: "알 수 없음"})",
+                throwable = ioe
+            )
+        }
+    }
+
+    /**
+     * NetworkModule 초기화 시 커넥션 풀 정리 콜백을 등록합니다.
+     */
+    internal fun registerOnProxyChangedListener(listener: () -> Unit) {
+        onProxyChangedListener = listener
+    }
+
+    /**
+     * 2단계(tsnet)에서 로컬 프록시를 활성화할 때 호출하는 진입점.
+     */
+    fun enableLocalProxy(
+        port: Int,
+        host: String = LocalProxyConfig.DEFAULT_HOST,
+        scheme: LocalProxyScheme = LocalProxyScheme.HTTP
+    ) {
+        applyProxy(
+            LocalProxyConfig(
+                enabled = true,
+                host = host,
+                port = port,
+                scheme = scheme
+            )
+        )
+    }
+
+    /**
+     * 로컬 프록시를 해제하고 기본 직결 네트워크로 복구합니다.
+     */
+    fun disableLocalProxy() {
+        applyProxy(LocalProxyConfig.DISABLED)
+    }
+
+    /**
+     * OkHttp와 WebView(ProxyController) 양쪽에 프록시 설정을 일괄 반영합니다.
+     */
+    fun applyProxy(config: LocalProxyConfig) {
+        _proxyConfig.value = config
+        onProxyChangedListener?.invoke()
+        applyToWebView(config)
+    }
+
+    private fun applyToWebView(config: LocalProxyConfig) {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+            if (config.isActive) {
+                AppErrorLogger.logError(
+                    tag = "WebViewProxy",
+                    message = "현재 기기의 WebView가 PROXY_OVERRIDE 기능을 지원하지 않습니다."
+                )
+            }
+            return
+        }
+
+        runCatching {
+            val controller = ProxyController.getInstance()
+            if (config.isActive) {
+                val webViewProxyConfig = ProxyConfig.Builder()
+                    .addProxyRule(config.toWebViewProxyRule())
+                    .addBypassRule("127.0.0.1")
+                    .addBypassRule("localhost")
+                    .build()
+
+                controller.setProxyOverride(webViewProxyConfig, proxyExecutor) {
+                    // WebView 전역 프록시 적용 완료
+                }
+            } else {
+                controller.clearProxyOverride(proxyExecutor) {
+                    // WebView 전역 프록시 해제 완료
+                }
+            }
+        }.onFailure { e ->
+            AppErrorLogger.logError(
+                tag = "WebViewProxy",
+                message = "WebView 프록시 설정 반영 중 오류가 발생했습니다.",
+                throwable = e
+            )
+        }
+    }
+}
