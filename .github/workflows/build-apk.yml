@@ -75,7 +75,6 @@ jobs:
           mkdir -p app/libs
           cd tsnet-bridge
           go get tailscale.com/tsnet@latest
-          go get github.com/wlynxg/anet@latest
           go mod tidy
           # go mod tidy 이후 gomobile bind가 요구하는 바인딩 런타임 패키지를 명시적으로 유지
           go get golang.org/x/mobile/bind@latest
