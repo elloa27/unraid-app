@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RestartAlt
@@ -31,6 +32,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -79,6 +81,7 @@ import java.util.Locale
 fun DashboardScreen(
     viewModel: DashboardViewModel,
     onNavigateToSettings: () -> Unit,
+    onOpenDockerWebUi: (DockerContainerItem) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -229,6 +232,9 @@ fun DashboardScreen(
                                             isAnyActionRunning = state.actionInProgressContainerId != null,
                                             onAction = { action ->
                                                 viewModel.performDockerAction(container, action)
+                                            },
+                                            onOpenWebUi = {
+                                                onOpenDockerWebUi(container)
                                             }
                                         )
                                     }
@@ -562,7 +568,8 @@ private fun DockerContainerCard(
     container: DockerContainerItem,
     isActionRunning: Boolean,
     isAnyActionRunning: Boolean,
-    onAction: (DockerAction) -> Unit
+    onAction: (DockerAction) -> Unit,
+    onOpenWebUi: () -> Unit
 ) {
     val stateColor = if (container.isRunning) StatusGreen else StatusRed
 
@@ -570,118 +577,146 @@ private fun DockerContainerCard(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(14.dp)
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 14.dp, vertical = 12.dp)
         ) {
-            Box(
-                modifier = Modifier
-                    .size(10.dp)
-                    .clip(CircleShape)
-                    .background(stateColor)
-            )
-            Spacer(modifier = Modifier.width(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(stateColor)
+                )
+                Spacer(modifier = Modifier.width(12.dp))
 
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = container.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = container.status.ifBlank { container.state },
-                    style = MaterialTheme.typography.labelMedium,
-                    color = stateColor,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                if (container.image.isNotBlank()) {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = container.image,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        text = container.name,
+                        style = MaterialTheme.typography.titleMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = container.status.ifBlank { container.state },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = stateColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (container.image.isNotBlank()) {
+                        Text(
+                            text = container.image,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                if (isActionRunning) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(28.dp),
+                        strokeWidth = 2.5.dp
+                    )
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (container.isRunning) {
+                            FilledTonalIconButton(
+                                onClick = { onAction(DockerAction.RESTART) },
+                                enabled = !isAnyActionRunning,
+                                modifier = Modifier.size(38.dp),
+                                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                    containerColor = StatusAmber.copy(alpha = 0.16f),
+                                    contentColor = StatusAmber
+                                )
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.RestartAlt,
+                                    contentDescription = "재시작",
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            FilledTonalIconButton(
+                                onClick = { onAction(DockerAction.STOP) },
+                                enabled = !isAnyActionRunning,
+                                modifier = Modifier.size(38.dp),
+                                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                    containerColor = StatusRed.copy(alpha = 0.16f),
+                                    contentColor = StatusRed
+                                )
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Stop,
+                                    contentDescription = "중지",
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        } else {
+                            FilledTonalIconButton(
+                                onClick = { onAction(DockerAction.START) },
+                                enabled = !isAnyActionRunning,
+                                modifier = Modifier.size(38.dp),
+                                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                    containerColor = StatusGreen.copy(alpha = 0.16f),
+                                    contentColor = StatusGreen
+                                )
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.PlayArrow,
+                                    contentDescription = "시작",
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            FilledTonalIconButton(
+                                onClick = { onAction(DockerAction.RESTART) },
+                                enabled = !isAnyActionRunning,
+                                modifier = Modifier.size(38.dp),
+                                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.RestartAlt,
+                                    contentDescription = "재시작",
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.width(8.dp))
-
-            if (isActionRunning) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(28.dp),
-                    strokeWidth = 2.5.dp
-                )
-            } else {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (container.isRunning) {
-                        FilledTonalIconButton(
-                            onClick = { onAction(DockerAction.RESTART) },
-                            enabled = !isAnyActionRunning,
-                            modifier = Modifier.size(38.dp),
-                            colors = IconButtonDefaults.filledTonalIconButtonColors(
-                                containerColor = StatusAmber.copy(alpha = 0.16f),
-                                contentColor = StatusAmber
-                            )
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.RestartAlt,
-                                contentDescription = "재시작",
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                        FilledTonalIconButton(
-                            onClick = { onAction(DockerAction.STOP) },
-                            enabled = !isAnyActionRunning,
-                            modifier = Modifier.size(38.dp),
-                            colors = IconButtonDefaults.filledTonalIconButtonColors(
-                                containerColor = StatusRed.copy(alpha = 0.16f),
-                                contentColor = StatusRed
-                            )
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Stop,
-                                contentDescription = "중지",
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                    } else {
-                        FilledTonalIconButton(
-                            onClick = { onAction(DockerAction.START) },
-                            enabled = !isAnyActionRunning,
-                            modifier = Modifier.size(38.dp),
-                            colors = IconButtonDefaults.filledTonalIconButtonColors(
-                                containerColor = StatusGreen.copy(alpha = 0.16f),
-                                contentColor = StatusGreen
-                            )
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.PlayArrow,
-                                contentDescription = "시작",
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                        FilledTonalIconButton(
-                            onClick = { onAction(DockerAction.RESTART) },
-                            enabled = !isAnyActionRunning,
-                            modifier = Modifier.size(38.dp),
-                            colors = IconButtonDefaults.filledTonalIconButtonColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                contentColor = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.RestartAlt,
-                                contentDescription = "재시작",
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                    }
+            // 실행 중이면서 웹 UI 주소가 자동 감지된 컨테이너에는 즉시 전체 화면 웹뷰 열기 버튼 제공
+            if (container.isRunning && container.hasWebUi) {
+                Spacer(modifier = Modifier.height(10.dp))
+                FilledTonalButton(
+                    onClick = onOpenWebUi,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(38.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.OpenInNew,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "웹 UI 열기",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
             }
         }

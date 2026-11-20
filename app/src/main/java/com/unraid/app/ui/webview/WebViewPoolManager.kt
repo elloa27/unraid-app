@@ -14,7 +14,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.unraid.app.data.local.AppErrorLogger
-import com.unraid.app.data.model.DockerServiceBookmark
+import com.unraid.app.data.model.WebServiceItem
 import com.unraid.app.network.NetworkModule
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,8 +27,8 @@ data class WebViewUiMeta(
 )
 
 /**
- * 도커 웹뷰(Kavita 등) 인스턴스를 서비스 ID별로 메모리에 캐싱하는 풀 매니저.
- * 다른 하단 탭에 다녀오거나 도커 서비스를 전환해도 WebView가 파괴/새로고침되지 않도록 상태를 유지합니다.
+ * 도커 웹뷰(자동 감지된 Unraid 도커 + 수동 등록 서비스) 인스턴스를 서비스 ID별로 메모리에 캐싱하는 풀 매니저.
+ * 다른 탭(Unraid 대시보드, 설정)에 다녀오거나 도커 서비스를 전환해도 WebView가 파괴/새로고침되지 않습니다.
  */
 class WebViewPoolManager {
 
@@ -42,18 +42,21 @@ class WebViewPoolManager {
     private val _metaByServiceId = MutableStateFlow<Map<String, WebViewUiMeta>>(emptyMap())
     val metaByServiceId: StateFlow<Map<String, WebViewUiMeta>> = _metaByServiceId.asStateFlow()
 
+    private val _cachedServiceIds = MutableStateFlow<Set<String>>(emptySet())
+    val cachedServiceIds: StateFlow<Set<String>> = _cachedServiceIds.asStateFlow()
+
     /**
      * 서비스 ID에 해당하는 캐싱된 WebView를 반환하거나 최초 1회 생성합니다.
-     * 이미 생성된 인스턴스가 있다면 절대 reload하지 않고 기존 상태를 그대로 유지합니다.
+     * 이미 생성된 인스턴스가 있다면 절대 reload하지 않고 기존 DOM/스크롤/로그인 상태를 그대로 유지합니다.
      */
     @SuppressLint("SetJavaScriptEnabled")
     fun getOrCreate(
         context: Context,
-        service: DockerServiceBookmark
+        service: WebServiceItem
     ): WebView {
         val existing = pool[service.id]
         if (existing != null) {
-            // 설정 화면에서 사용자가 URL 자체를 변경한 경우에만 새 주소 로드
+            // 설정에서 URL이 변경되었거나 컨테이너 포트가 바뀐 경우에만 새 주소 로드
             if (existing.configuredUrl != service.url) {
                 existing.configuredUrl = service.url
                 existing.webView.loadUrl(service.url)
@@ -177,17 +180,16 @@ class WebViewPoolManager {
         }
 
         pool[service.id] = CachedEntry(webView = webView, configuredUrl = service.url)
+        _cachedServiceIds.value = pool.keys.toSet()
         updateMeta(service.id) { WebViewUiMeta(progress = 0, isLoading = true, canGoBack = false) }
         return webView
     }
-
-    fun getCachedWebView(serviceId: String): WebView? = pool[serviceId]?.webView
 
     fun reload(serviceId: String) {
         pool[serviceId]?.webView?.reload()
     }
 
-    fun goHome(service: DockerServiceBookmark) {
+    fun goHome(service: WebServiceItem) {
         pool[service.id]?.webView?.loadUrl(service.url)
     }
 
@@ -201,19 +203,11 @@ class WebViewPoolManager {
         }
     }
 
-    /**
-     * 설정에서 삭제된 서비스의 WebView 캐시만 정리합니다.
-     */
-    fun retainOnly(validServiceIds: Set<String>) {
-        val iterator = pool.entries.iterator()
-        while (iterator.hasNext()) {
-            val (id, entry) = iterator.next()
-            if (id !in validServiceIds) {
-                destroyWebViewSafely(entry.webView)
-                iterator.remove()
-                _metaByServiceId.value = _metaByServiceId.value - id
-            }
-        }
+    fun evict(serviceId: String) {
+        val removed = pool.remove(serviceId) ?: return
+        destroyWebViewSafely(removed.webView)
+        _cachedServiceIds.value = pool.keys.toSet()
+        _metaByServiceId.value = _metaByServiceId.value - serviceId
     }
 
     /**
@@ -222,6 +216,7 @@ class WebViewPoolManager {
     fun destroyAll() {
         pool.values.forEach { destroyWebViewSafely(it.webView) }
         pool.clear()
+        _cachedServiceIds.value = emptySet()
         _metaByServiceId.value = emptyMap()
     }
 

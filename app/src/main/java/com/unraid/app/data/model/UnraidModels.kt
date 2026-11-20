@@ -34,19 +34,49 @@ enum class DiskRole(val labelKo: String) {
 }
 
 /**
- * Unraid 도커 컨테이너 정보
+ * Unraid 도커 컨테이너 정보 (자동 감지된 웹 UI 주소 및 아이콘 포함)
  */
 data class DockerContainerItem(
     val id: String,
     val name: String,
     val image: String,
     val state: String,
-    val status: String
+    val status: String,
+    val webUiUrl: String? = null,
+    val iconUrl: String? = null
 ) {
     val isRunning: Boolean
         get() = state.equals("RUNNING", ignoreCase = true) ||
             status.startsWith("Up", ignoreCase = true)
+
+    val hasWebUi: Boolean
+        get() = !webUiUrl.isNullOrBlank()
+
+    /**
+     * 컨테이너 재생성/업데이트로 내부 해시 ID가 바뀌어도 캐시 키가 안정적으로 유지되도록
+     * 컨테이너 이름 기반의 자동 감지 서비스 ID를 제공합니다.
+     */
+    val autoServiceId: String
+        get() = "auto:${name.lowercase()}"
 }
+
+/**
+ * 도커 웹뷰 런처 및 전체 화면 웹뷰에서 공통으로 사용하는 통합 웹 서비스 모델
+ * (Unraid 자동 감지 항목 + 설정 화면 수동 등록/커스텀 항목 통합)
+ */
+enum class WebServiceSource(val labelKo: String) {
+    AUTO_DOCKER("자동 감지"),
+    MANUAL("수동 등록")
+}
+
+data class WebServiceItem(
+    val id: String,
+    val name: String,
+    val url: String,
+    val source: WebServiceSource,
+    val isRunning: Boolean = true,
+    val iconUrl: String? = null
+)
 
 /**
  * 도커 컨테이너 제어 명령 종류

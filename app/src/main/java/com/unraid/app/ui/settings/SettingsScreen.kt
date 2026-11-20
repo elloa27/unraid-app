@@ -329,9 +329,15 @@ fun SettingsScreen(
                             }
                         }
 
+                        Text(
+                            text = "Unraid 도커 웹 UI는 자동으로 감지됩니다. 자동 감지가 안 되거나 주소를 직접 지정(커스텀)하고 싶은 서비스만 아래에서 추가하세요. (같은 이름으로 등록하면 자동 감지 주소를 덮어씁니다.)",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
                         if (dockerServices.isEmpty()) {
                             Text(
-                                text = "등록된 웹 서비스가 없습니다. [추가]를 눌러 Kavita 등 도커 웹 주소를 등록하세요.",
+                                text = "수동 등록된 커스텀 서비스가 없습니다.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

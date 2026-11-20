@@ -23,10 +23,13 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.net.URI
 
 /**
  * Unraid 공식 GraphQL API (<서버주소>/graphql, 헤더: x-api-key) 통신 클라이언트.
- * Unraid 버전에 따른 미세한 스키마 차이에도 안전하게 동작하도록 방어적 JSON 파싱을 수행합니다.
+ * - Unraid 버전에 따른 미세한 스키마 차이에도 안전하게 동작하도록 방어적 JSON 파싱을 수행합니다.
+ * - 도커 컨테이너의 labels(net.unraid.docker.webui, net.unraid.docker.icon)와 ports를 파싱해
+ *   [IP], [PORT:xxxx] 플레이스홀더를 실제 접속 주소로 자동 치환합니다.
  */
 class UnraidGraphQlClient(
     private val httpClientProvider: () -> OkHttpClient = { NetworkModule.okHttpClient }
@@ -37,6 +40,13 @@ class UnraidGraphQlClient(
     }
 
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+
+    private data class ContainerPortMapping(
+        val ip: String?,
+        val privatePort: Int?,
+        val publicPort: Int?,
+        val type: String?
+    )
 
     /**
      * 설정 화면의 '연결 테스트' 용도로 Unraid 어레이 상태를 가볍게 조회합니다.
@@ -65,7 +75,8 @@ class UnraidGraphQlClient(
     }
 
     /**
-     * 대시보드에 필요한 어레이 상태, 용량, 디스크(패리티/어레이/캐시), 도커 컨테이너 목록을 조회합니다.
+     * 대시보드에 필요한 어레이 상태, 용량, 디스크(패리티/어레이/캐시),
+     * 도커 컨테이너 목록(웹 UI 라벨/포트 포함)을 조회합니다.
      */
     suspend fun fetchDashboard(serverUrl: String, apiKey: String): Result<UnraidDashboardData> {
         val primaryQuery = """
@@ -111,6 +122,13 @@ class UnraidGraphQlClient(
                   image
                   state
                   status
+                  labels
+                  ports {
+                    ip
+                    privatePort
+                    publicPort
+                    type
+                  }
                 }
               }
             }
@@ -162,8 +180,9 @@ class UnraidGraphQlClient(
             }
         }
 
+        val serverHost = extractHostFromUrl(serverUrl)
         return runCatching {
-            parseDashboardData(root)
+            parseDashboardData(root, serverHost)
         }.onFailure { e ->
             AppErrorLogger.logError(
                 tag = "UnraidGraphQL",
@@ -320,7 +339,7 @@ class UnraidGraphQlClient(
         }
     }
 
-    private fun parseDashboardData(root: JsonObject): UnraidDashboardData {
+    private fun parseDashboardData(root: JsonObject, serverHost: String?): UnraidDashboardData {
         val dataObj = root["data"] as? JsonObject
             ?: throw IllegalStateException("대시보드 응답에 data 객체가 없습니다.")
 
@@ -340,7 +359,7 @@ class UnraidGraphQlClient(
 
         val dockerObj = dataObj["docker"] as? JsonObject
         val containersArray = dockerObj?.get("containers") as? JsonArray
-        val containers = parseContainerList(containersArray)
+        val containers = parseContainerList(containersArray, serverHost)
 
         return UnraidDashboardData(
             arrayState = arrayState,
@@ -378,7 +397,10 @@ class UnraidGraphQlClient(
         }
     }
 
-    private fun parseContainerList(array: JsonArray?): List<DockerContainerItem> {
+    private fun parseContainerList(
+        array: JsonArray?,
+        serverHost: String?
+    ): List<DockerContainerItem> {
         if (array == null) return emptyList()
         return array.mapNotNull { element ->
             val obj = element as? JsonObject ?: return@mapNotNull null
@@ -390,17 +412,116 @@ class UnraidGraphQlClient(
                 ?: id
             val cleanName = rawName.removePrefix("/")
 
+            val labelsObj = extractLabelsObject(obj["labels"])
+            val portMappings = parsePortMappings(obj["ports"] as? JsonArray)
+
+            val rawWebUi = labelsObj?.stringOrNull(LABEL_UNRAID_WEBUI)
+            val resolvedWebUiUrl = resolveUnraidWebUiUrl(
+                rawTemplate = rawWebUi,
+                serverHost = serverHost,
+                ports = portMappings
+            )
+
+            val iconUrl = labelsObj?.stringOrNull(LABEL_UNRAID_ICON)
+                ?.trim()
+                ?.takeIf {
+                    it.startsWith("http://", ignoreCase = true) ||
+                        it.startsWith("https://", ignoreCase = true)
+                }
+
             DockerContainerItem(
                 id = id,
                 name = cleanName,
                 image = obj.stringOrNull("image").orEmpty(),
                 state = obj.stringOrNull("state") ?: "UNKNOWN",
-                status = obj.stringOrNull("status").orEmpty()
+                status = obj.stringOrNull("status").orEmpty(),
+                webUiUrl = resolvedWebUiUrl,
+                iconUrl = iconUrl
             )
         }.sortedWith(
             compareByDescending<DockerContainerItem> { it.isRunning }
                 .thenBy { it.name.lowercase() }
         )
+    }
+
+    private fun extractLabelsObject(element: JsonElement?): JsonObject? {
+        if (element == null || element is JsonNull) return null
+        if (element is JsonObject) return element
+        if (element is JsonPrimitive) {
+            val raw = element.contentOrNull ?: return null
+            return runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull()
+        }
+        return null
+    }
+
+    private fun parsePortMappings(array: JsonArray?): List<ContainerPortMapping> {
+        if (array == null) return emptyList()
+        return array.mapNotNull { element ->
+            val obj = element as? JsonObject ?: return@mapNotNull null
+            ContainerPortMapping(
+                ip = obj.stringOrNull("ip"),
+                privatePort = obj.intOrNull("privatePort"),
+                publicPort = obj.intOrNull("publicPort"),
+                type = obj.stringOrNull("type")
+            )
+        }
+    }
+
+    /**
+     * Unraid 도커 라벨(net.unraid.docker.webui)의 [IP], [PORT:xxxx] 플레이스홀더를
+     * 현재 연결된 Unraid 서버 호스트와 컨테이너의 실제 호스트 포트로 치환합니다.
+     */
+    private fun resolveUnraidWebUiUrl(
+        rawTemplate: String?,
+        serverHost: String?,
+        ports: List<ContainerPortMapping>
+    ): String? {
+        val template = rawTemplate?.trim().orEmpty()
+        if (template.isBlank()) return null
+
+        var resolved = template
+
+        // 1) [IP] -> 현재 연결된 Unraid 서버 호스트 주소로 치환
+        if (IP_PLACEHOLDER_REGEX.containsMatchIn(resolved)) {
+            val host = serverHost?.takeIf { it.isNotBlank() } ?: return null
+            resolved = IP_PLACEHOLDER_REGEX.replace(resolved, host)
+        }
+
+        // 2) [PORT:xxxx] -> ports 매핑에서 privatePort == xxxx 인 실제 publicPort(TCP 우선)로 치환
+        resolved = PORT_PLACEHOLDER_REGEX.replace(resolved) { match ->
+            val requestedPort = match.groupValues[1].toIntOrNull()
+            val mappedPort = if (requestedPort != null) {
+                val matching = ports.filter { it.privatePort == requestedPort && (it.publicPort ?: 0) > 0 }
+                val tcpPreferred = matching.firstOrNull { it.type.equals("TCP", ignoreCase = true) }
+                    ?: matching.firstOrNull()
+                tcpPreferred?.publicPort
+            } else {
+                null
+            }
+            (mappedPort ?: requestedPort)?.toString() ?: match.groupValues[1]
+        }
+
+        // 치환되지 않은 잘못된 플레이스홀더가 남아 있으면 제외
+        if (resolved.contains("[IP]", ignoreCase = true) || resolved.contains("[PORT:", ignoreCase = true)) {
+            return null
+        }
+
+        val withScheme = if (
+            resolved.startsWith("http://", ignoreCase = true) ||
+            resolved.startsWith("https://", ignoreCase = true)
+        ) {
+            resolved
+        } else {
+            "http://$resolved"
+        }
+
+        return withScheme.trim()
+    }
+
+    private fun extractHostFromUrl(serverUrl: String): String? {
+        val normalized = AppPreferencesRepository.normalizeUrl(serverUrl)
+        if (normalized.isBlank()) return null
+        return runCatching { URI(normalized).host }.getOrNull()
     }
 
     private fun JsonElement.primitiveContentOrNull(): String? {
@@ -427,5 +548,12 @@ class UnraidGraphQlClient(
     private fun JsonObject.booleanOrNull(key: String): Boolean? {
         val raw = stringOrNull(key) ?: return null
         return raw.toBooleanStrictOrNull()
+    }
+
+    companion object {
+        private const val LABEL_UNRAID_WEBUI = "net.unraid.docker.webui"
+        private const val LABEL_UNRAID_ICON = "net.unraid.docker.icon"
+        private val IP_PLACEHOLDER_REGEX = Regex("\\[IP]", RegexOption.IGNORE_CASE)
+        private val PORT_PLACEHOLDER_REGEX = Regex("\\[PORT:(\\d+)]", RegexOption.IGNORE_CASE)
     }
 }
