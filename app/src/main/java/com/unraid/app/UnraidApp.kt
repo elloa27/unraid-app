@@ -10,6 +10,8 @@ import com.unraid.app.data.local.SecureCredentialStore
 import com.unraid.app.data.remote.UnraidGraphQlClient
 import com.unraid.app.network.NetworkModule
 import com.unraid.app.network.TailscaleConnectionManager
+import com.unraid.app.plugin.emby.EmbyApiClient
+import com.unraid.app.plugin.emby.EmbyCredentialStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -37,6 +39,12 @@ class UnraidApp : Application(), ImageLoaderFactory {
     lateinit var tailscaleConnectionManager: TailscaleConnectionManager
         private set
 
+    lateinit var embyCredentialStore: EmbyCredentialStore
+        private set
+
+    lateinit var embyApiClient: EmbyApiClient
+        private set
+
     override fun onCreate() {
         super.onCreate()
         // 전역 에러 로거 및 미처리 예외 핸들러 최우선 초기화
@@ -45,6 +53,8 @@ class UnraidApp : Application(), ImageLoaderFactory {
         preferencesRepository = AppPreferencesRepository(this)
         secureCredentialStore = SecureCredentialStore(this)
         unraidGraphQlClient = UnraidGraphQlClient { NetworkModule.okHttpClient }
+        embyCredentialStore = EmbyCredentialStore(this)
+        embyApiClient = EmbyApiClient { NetworkModule.okHttpClient }
         tailscaleConnectionManager = TailscaleConnectionManager(
             context = this,
             preferencesRepository = preferencesRepository,

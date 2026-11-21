@@ -27,3 +27,6 @@
 # Gomobile / tsnet-bridge JNI 바인딩 유지
 -keep class go.** { *; }
 -keep class com.unraid.app.tsnetbridge.** { *; }
+
+# libmpv JNI 바인딩 유지
+-keep class dev.jdtech.mpv.** { *; }

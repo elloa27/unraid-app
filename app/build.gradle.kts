@@ -21,6 +21,11 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+
+        // tsnetbridge.aar와 동일하게 arm64-v8a만 포함해 APK 용량 최적화
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     // GitHub Actions Secrets 기반 Release 서명 설정 (앞뒤 공백/개행 자동 제거, 미설정 시 Debug 빌드에 영향 없음)
@@ -114,4 +119,7 @@ dependencies {
 
     // 2단계: gomobile로 빌드된 내장 Tailscale(tsnet) 안드로이드 브리지 라이브러리
     implementation(files("libs/tsnetbridge.aar"))
+
+    // 3단계: Emby 전용 네이티브 플레이어(libmpv)
+    implementation(libs.libmpv)
 }
