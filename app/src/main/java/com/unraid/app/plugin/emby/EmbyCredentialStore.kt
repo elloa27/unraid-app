@@ -68,6 +68,13 @@ class EmbyCredentialStore(context: Context) {
         _configFlow.value = readConfig()
     }
 
+    fun setLibrarySortOption(option: EmbySortOption) {
+        prefs.edit()
+            .putString(KEY_LIBRARY_SORT_OPTION, option.storageKey)
+            .apply()
+        _configFlow.value = readConfig()
+    }
+
     fun logout() {
         prefs.edit()
             .remove(KEY_ACCESS_TOKEN)
@@ -86,7 +93,8 @@ class EmbyCredentialStore(context: Context) {
             username = prefs.getString(KEY_USERNAME, "").orEmpty(),
             preferHardwareDecoding = prefs.getBoolean(KEY_PREFER_HWDEC, true),
             subtitleFontName = prefs.getString(KEY_SUBTITLE_FONT_NAME, "").orEmpty(),
-            forceSubtitleFontOnAss = prefs.getBoolean(KEY_FORCE_SUBTITLE_FONT_ON_ASS, false)
+            forceSubtitleFontOnAss = prefs.getBoolean(KEY_FORCE_SUBTITLE_FONT_ON_ASS, false),
+            librarySortOption = EmbySortOption.fromStorageKey(prefs.getString(KEY_LIBRARY_SORT_OPTION, null))
         )
     }
 
@@ -124,6 +132,7 @@ class EmbyCredentialStore(context: Context) {
         private const val KEY_PREFER_HWDEC = "emby_prefer_hwdec"
         private const val KEY_SUBTITLE_FONT_NAME = "emby_subtitle_font_name"
         private const val KEY_FORCE_SUBTITLE_FONT_ON_ASS = "emby_force_subtitle_font_on_ass"
+        private const val KEY_LIBRARY_SORT_OPTION = "emby_library_sort_option"
     }
 }
 

@@ -34,6 +34,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Audiotrack
@@ -45,6 +46,8 @@ import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.AlertDialog
@@ -62,6 +65,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -114,7 +118,61 @@ private data class MpvTrackInfo(
 }
 
 private enum class ActivePlayerDialog {
-    NONE, AUDIO, SUBTITLE, SPEED
+    NONE, AUDIO, SUBTITLE, SPEED, EPISODES
+}
+
+/**
+ * 이전화/다음화 전환 시 화면 회전 깜박임 없이 가로 몰입 모드를 유지하면서
+ * 개별 에피소드의 libmpv 세션만 깔끔하게 교체하는 상위 호스트 Composable.
+ */
+@Composable
+fun MpvPlayerSessionHost(
+    request: EmbyPlaybackRequest,
+    apiClient: EmbyApiClient,
+    credentialStore: EmbyCredentialStore,
+    previousEpisode: EmbyItem?,
+    nextEpisode: EmbyItem?,
+    allEpisodes: List<EmbyItem>,
+    isSwitchingEpisode: Boolean,
+    onSelectEpisode: (EmbyItem) -> Unit,
+    onExit: () -> Unit
+) {
+    val context = LocalContext.current
+    val activity = remember(context) { context.findActivity() }
+
+    DisposableEffect(Unit) {
+        val previousOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        activity?.let { act ->
+            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            act.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            WindowCompat.getInsetsController(act.window, act.window.decorView).apply {
+                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                hide(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+        onDispose {
+            activity?.let { act ->
+                act.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                WindowCompat.getInsetsController(act.window, act.window.decorView)
+                    .show(WindowInsetsCompat.Type.systemBars())
+                act.requestedOrientation = previousOrientation
+            }
+        }
+    }
+
+    key(request.playSessionId) {
+        MpvPlayerScreen(
+            request = request,
+            apiClient = apiClient,
+            credentialStore = credentialStore,
+            previousEpisode = previousEpisode,
+            nextEpisode = nextEpisode,
+            allEpisodes = allEpisodes,
+            isSwitchingEpisode = isSwitchingEpisode,
+            onSelectEpisode = onSelectEpisode,
+            onExit = onExit
+        )
+    }
 }
 
 /**
@@ -122,13 +180,18 @@ private enum class ActivePlayerDialog {
  * - 내장 Tailscale(tsnet) 프록시(http-proxy) 및 사설 SSL 허용(tls-verify=no) 자동 브릿지
  * - 하드웨어(auto-safe) / 소프트웨어 디코딩 전환, libass ASS/SSA 및 외부 SRT 자막 자동 로드
  * - Emby 재생 시작 / 10초 간격 진행 / 종료 시 이어보기 위치 동기화
- * - 탭 오버레이, 좌우 더블탭 10초 이동, 좌측 밝기·우측 볼륨 스와이프, 오디오/자막/속도/화면비율/잠금
+ * - 이전화/다음화 즉시 전환 및 회차 목록 선택, 탭 오버레이, 좌우 더블탭 ±10초, 밝기/볼륨 스와이프
  */
 @Composable
 fun MpvPlayerScreen(
     request: EmbyPlaybackRequest,
     apiClient: EmbyApiClient,
     credentialStore: EmbyCredentialStore,
+    previousEpisode: EmbyItem? = null,
+    nextEpisode: EmbyItem? = null,
+    allEpisodes: List<EmbyItem> = emptyList(),
+    isSwitchingEpisode: Boolean = false,
+    onSelectEpisode: (EmbyItem) -> Unit = {},
     onExit: () -> Unit
 ) {
     val context = LocalContext.current
@@ -233,18 +296,8 @@ fun MpvPlayerScreen(
         }
     }
 
-    // 가로 몰입 모드 + 화면 꺼짐 방지 + libmpv 인스턴스 생성/초기화/해제 생명주기
+    // libmpv 인스턴스 생성/초기화/해제 생명주기 (화면 방향/몰입 모드는 MpvPlayerSessionHost가 유지)
     DisposableEffect(request.playSessionId) {
-        val previousOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        activity?.let { act ->
-            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            act.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            WindowCompat.getInsetsController(act.window, act.window.decorView).apply {
-                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                hide(WindowInsetsCompat.Type.systemBars())
-            }
-        }
-
         var createdMpv: MPVLib? = null
 
         val observer = object : MPVLib.EventObserver {
@@ -307,6 +360,8 @@ fun MpvPlayerScreen(
 
                         MPVLib.MpvEvent.MPV_EVENT_END_FILE -> {
                             isBuffering = false
+                            // 영상이 끝났을 때 다음화 버튼 등을 바로 누를 수 있도록 컨트롤 표시
+                            controlsVisible = true
                         }
                     }
                 }
@@ -434,13 +489,6 @@ fun MpvPlayerScreen(
                 }
             }
             mpvInstance = null
-
-            activity?.let { act ->
-                act.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                WindowCompat.getInsetsController(act.window, act.window.decorView)
-                    .show(WindowInsetsCompat.Type.systemBars())
-                act.requestedOrientation = previousOrientation
-            }
         }
     }
 
@@ -565,14 +613,25 @@ fun MpvPlayerScreen(
             )
         }
 
-        // 버퍼링 로딩 인디케이터
-        if (isBuffering && initError == null) {
-            CircularProgressIndicator(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .size(44.dp),
-                color = MaterialTheme.colorScheme.primary
-            )
+        // 버퍼링 또는 회차 전환 로딩 인디케이터
+        if ((isBuffering || isSwitchingEpisode) && initError == null) {
+            Column(
+                modifier = Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(44.dp),
+                    color = MaterialTheme.colorScheme.primary
+                )
+                if (isSwitchingEpisode) {
+                    Text(
+                        text = "회차 전환 중...",
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+            }
         }
 
         // 초기화/재생 오류 안내
@@ -728,12 +787,31 @@ fun MpvPlayerScreen(
                         }
                     }
 
-                    // 중앙 재생 컨트롤 (-10초 / 재생·일시정지 / +10초)
+                    // 중앙 재생 컨트롤 (이전화 / -10초 / 재생·일시정지 / +10초 / 다음화)
                     Row(
                         modifier = Modifier.align(Alignment.Center),
-                        horizontalArrangement = Arrangement.spacedBy(28.dp),
+                        horizontalArrangement = Arrangement.spacedBy(20.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        if (allEpisodes.size > 1 || previousEpisode != null || nextEpisode != null) {
+                            Surface(
+                                onClick = { previousEpisode?.let(onSelectEpisode) },
+                                enabled = previousEpisode != null && !isSwitchingEpisode,
+                                shape = CircleShape,
+                                color = Color(0x88000000),
+                                modifier = Modifier.size(48.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Filled.SkipPrevious,
+                                        contentDescription = "이전화",
+                                        tint = if (previousEpisode != null) Color.White else Color(0x55FFFFFF),
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                            }
+                        }
+
                         Surface(
                             onClick = {
                                 runCatching { mpvInstance?.command(arrayOf("seek", "-10", "relative")) }
@@ -787,6 +865,25 @@ fun MpvPlayerScreen(
                                     tint = Color.White,
                                     modifier = Modifier.size(30.dp)
                                 )
+                            }
+                        }
+
+                        if (allEpisodes.size > 1 || previousEpisode != null || nextEpisode != null) {
+                            Surface(
+                                onClick = { nextEpisode?.let(onSelectEpisode) },
+                                enabled = nextEpisode != null && !isSwitchingEpisode,
+                                shape = CircleShape,
+                                color = Color(0x88000000),
+                                modifier = Modifier.size(48.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Filled.SkipNext,
+                                        contentDescription = "다음화",
+                                        tint = if (nextEpisode != null) Color.White else Color(0x55FFFFFF),
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -853,6 +950,13 @@ fun MpvPlayerScreen(
                             horizontalArrangement = Arrangement.SpaceEvenly,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            if (allEpisodes.size > 1) {
+                                PlayerQuickChip(
+                                    icon = Icons.AutoMirrored.Filled.List,
+                                    label = "회차",
+                                    onClick = { activeDialog = ActivePlayerDialog.EPISODES }
+                                )
+                            }
                             PlayerQuickChip(
                                 icon = Icons.Filled.Audiotrack,
                                 label = "오디오",
@@ -1016,6 +1120,54 @@ fun MpvPlayerScreen(
                             RadioButton(selected = playbackSpeed == speed, onClick = null)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(text = "${speed}x")
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { activeDialog = ActivePlayerDialog.NONE }) {
+                    Text("닫기")
+                }
+            }
+        )
+    }
+
+    // 회차 바로 이동 다이얼로그
+    if (activeDialog == ActivePlayerDialog.EPISODES) {
+        AlertDialog(
+            onDismissRequest = { activeDialog = ActivePlayerDialog.NONE },
+            title = { Text("회차 선택 (${allEpisodes.size}화)") },
+            text = {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    items(allEpisodes, key = { it.id }) { ep ->
+                        val isCurrent = ep.id == request.item.id
+                        val prefix = buildString {
+                            ep.seasonNumber?.let { append("S${it}") }
+                            ep.episodeNumber?.let { append("E${it}") }
+                        }.takeIf { it.isNotBlank() }?.let { "$it · " }.orEmpty()
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !isCurrent && !isSwitchingEpisode) {
+                                    activeDialog = ActivePlayerDialog.NONE
+                                    onSelectEpisode(ep)
+                                }
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = isCurrent, onClick = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "$prefix${ep.name}",
+                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isCurrent) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
                 }

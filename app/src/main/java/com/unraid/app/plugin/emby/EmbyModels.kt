@@ -1,6 +1,53 @@
 package com.unraid.app.plugin.emby
 
 /**
+ * Emby 라이브러리(시리즈/영화) 정렬 기준 옵션
+ */
+enum class EmbySortOption(
+    val storageKey: String,
+    val labelKo: String,
+    val sortBy: String,
+    val sortOrder: String
+) {
+    NAME_ASC(
+        storageKey = "name_asc",
+        labelKo = "이름순 (가나다/A-Z)",
+        sortBy = "SortName",
+        sortOrder = "Ascending"
+    ),
+    NAME_DESC(
+        storageKey = "name_desc",
+        labelKo = "이름 역순 (Z-A)",
+        sortBy = "SortName",
+        sortOrder = "Descending"
+    ),
+    DATE_ADDED_DESC(
+        storageKey = "date_added_desc",
+        labelKo = "최신 추가순",
+        sortBy = "DateCreated,SortName",
+        sortOrder = "Descending"
+    ),
+    PREMIERE_DATE_DESC(
+        storageKey = "premiere_date_desc",
+        labelKo = "최신 방영/개봉순",
+        sortBy = "PremiereDate,ProductionYear,SortName",
+        sortOrder = "Descending"
+    ),
+    COMMUNITY_RATING_DESC(
+        storageKey = "rating_desc",
+        labelKo = "평점 높은순",
+        sortBy = "CommunityRating,SortName",
+        sortOrder = "Descending"
+    );
+
+    companion object {
+        fun fromStorageKey(key: String?): EmbySortOption {
+            return entries.firstOrNull { it.storageKey.equals(key, ignoreCase = true) } ?: NAME_ASC
+        }
+    }
+}
+
+/**
  * 암호화 저장소에 보관되는 Emby 인증 및 서버 연결 정보
  */
 data class EmbyAuthConfig(
@@ -11,7 +58,8 @@ data class EmbyAuthConfig(
     val username: String = "",
     val preferHardwareDecoding: Boolean = true,
     val subtitleFontName: String = "",
-    val forceSubtitleFontOnAss: Boolean = false
+    val forceSubtitleFontOnAss: Boolean = false,
+    val librarySortOption: EmbySortOption = EmbySortOption.NAME_ASC
 ) {
     val isAuthenticated: Boolean
         get() = accessToken.isNotBlank() && userId.isNotBlank()

@@ -27,7 +27,9 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Login
 import androidx.compose.material.icons.filled.Movie
@@ -37,6 +39,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -44,6 +47,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
@@ -121,16 +126,75 @@ fun EmbyNativeRootScreen(
     }
 
     var activePlaybackRequest by remember { mutableStateOf<EmbyPlaybackRequest?>(null) }
+    var seriesPlaylist by remember { mutableStateOf<List<EmbyItem>>(emptyList()) }
+    var isSwitchingEpisode by remember { mutableStateOf(false) }
     var homeRefreshTrigger by remember { mutableStateOf(0) }
     val navStack = remember { mutableStateListOf<EmbyNavRoute>(EmbyNavRoute.Home) }
+    val rootScope = rememberCoroutineScope()
+
+    // 에피소드 재생 시(홈 이어보기 포함) 해당 시리즈의 전체 에피소드 목록을 자동 조회해 이전화/다음화 버튼 활성화
+    val activeSeriesId = activePlaybackRequest?.item?.seriesId
+    LaunchedEffect(activeSeriesId, effectiveBaseUrl, authConfig.accessToken) {
+        if (activeSeriesId.isNullOrBlank() || !authConfig.isAuthenticated) {
+            seriesPlaylist = emptyList()
+            return@LaunchedEffect
+        }
+        val res = apiClient.fetchAllSeriesEpisodes(
+            baseUrl = effectiveBaseUrl,
+            userId = authConfig.userId,
+            accessToken = authConfig.accessToken,
+            seriesId = activeSeriesId
+        )
+        seriesPlaylist = res.getOrDefault(emptyList())
+    }
 
     if (activePlaybackRequest != null) {
-        MpvPlayerScreen(
-            request = activePlaybackRequest!!,
+        val currentReq = activePlaybackRequest!!
+        val currentIdx = seriesPlaylist.indexOfFirst { it.id == currentReq.item.id }
+        val prevEp = if (currentIdx > 0) seriesPlaylist[currentIdx - 1] else null
+        val nextEp = if (currentIdx >= 0 && currentIdx < seriesPlaylist.lastIndex) {
+            seriesPlaylist[currentIdx + 1]
+        } else {
+            null
+        }
+
+        MpvPlayerSessionHost(
+            request = currentReq,
             apiClient = apiClient,
             credentialStore = credentialStore,
+            previousEpisode = prevEp,
+            nextEpisode = nextEp,
+            allEpisodes = seriesPlaylist,
+            isSwitchingEpisode = isSwitchingEpisode,
+            onSelectEpisode = { targetEp ->
+                if (isSwitchingEpisode) return@MpvPlayerSessionHost
+                rootScope.launch {
+                    isSwitchingEpisode = true
+                    val fullEp = apiClient.fetchItemDetail(
+                        baseUrl = effectiveBaseUrl,
+                        userId = authConfig.userId,
+                        accessToken = authConfig.accessToken,
+                        itemId = targetEp.id
+                    ).getOrDefault(targetEp)
+
+                    activePlaybackRequest = apiClient.buildPlaybackRequest(
+                        item = fullEp,
+                        baseUrl = effectiveBaseUrl,
+                        accessToken = authConfig.accessToken,
+                        userId = authConfig.userId,
+                        resume = false
+                    )
+                    // 상세 화면에서 진입한 경우 뒤로 나갔을 때도 마지막 시청 회차가 보이도록 갱신
+                    val topRoute = navStack.lastOrNull()
+                    if (topRoute is EmbyNavRoute.Detail) {
+                        navStack[navStack.lastIndex] = EmbyNavRoute.Detail(fullEp)
+                    }
+                    isSwitchingEpisode = false
+                }
+            },
             onExit = {
                 activePlaybackRequest = null
+                isSwitchingEpisode = false
                 // 재생 종료 후 이어보기 위치가 반영되도록 홈/상세 갱신 트리거
                 homeRefreshTrigger += 1
             }
@@ -212,6 +276,7 @@ fun EmbyNativeRootScreen(
                 baseUrl = effectiveBaseUrl,
                 authConfig = authConfig,
                 apiClient = apiClient,
+                onSelectSortOption = { option -> credentialStore.setLibrarySortOption(option) },
                 onBack = ::popOrExit,
                 onOpenSearch = { navStack.add(EmbyNavRoute.Search) },
                 onOpenItem = ::openItem
@@ -631,6 +696,7 @@ private fun EmbyLibraryGridScreen(
     baseUrl: String,
     authConfig: EmbyAuthConfig,
     apiClient: EmbyApiClient,
+    onSelectSortOption: (EmbySortOption) -> Unit,
     onBack: () -> Unit,
     onOpenSearch: () -> Unit,
     onOpenItem: (EmbyItem) -> Unit
@@ -638,11 +704,20 @@ private fun EmbyLibraryGridScreen(
     var isLoading by remember { mutableStateOf(true) }
     var items by remember { mutableStateOf<List<EmbyItem>>(emptyList()) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var showSortMenu by remember { mutableStateOf(false) }
 
-    LaunchedEffect(library.id, baseUrl) {
+    val sortOption = authConfig.librarySortOption
+
+    LaunchedEffect(library.id, baseUrl, sortOption) {
         isLoading = true
         errorMessage = null
-        val res = apiClient.fetchLibraryItems(baseUrl, authConfig.userId, authConfig.accessToken, library.id)
+        val res = apiClient.fetchLibraryItems(
+            baseUrl = baseUrl,
+            userId = authConfig.userId,
+            accessToken = authConfig.accessToken,
+            libraryId = library.id,
+            sortOption = sortOption
+        )
         res.onSuccess { items = it }
             .onFailure { errorMessage = it.localizedMessage ?: "라이브러리를 불러오지 못했습니다." }
         isLoading = false
@@ -651,13 +726,71 @@ private fun EmbyLibraryGridScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(library.name) },
+                title = {
+                    Column {
+                        Text(
+                            text = library.name,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "정렬: ${sortOption.labelKo}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "뒤로")
                     }
                 },
                 actions = {
+                    Box {
+                        IconButton(onClick = { showSortMenu = true }) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Sort,
+                                contentDescription = "정렬 변경"
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = showSortMenu,
+                            onDismissRequest = { showSortMenu = false }
+                        ) {
+                            EmbySortOption.entries.forEach { option ->
+                                val selected = option == sortOption
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = option.labelKo,
+                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (selected) {
+                                                MaterialTheme.colorScheme.primary
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurface
+                                            }
+                                        )
+                                    },
+                                    trailingIcon = if (selected) {
+                                        {
+                                            Icon(
+                                                imageVector = Icons.Filled.Check,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    } else {
+                                        null
+                                    },
+                                    onClick = {
+                                        showSortMenu = false
+                                        onSelectSortOption(option)
+                                    }
+                                )
+                            }
+                        }
+                    }
                     IconButton(onClick = onOpenSearch) {
                         Icon(Icons.Filled.Search, contentDescription = "검색")
                     }
@@ -809,8 +942,13 @@ private fun EmbySeriesScreen(
     var seasons by remember { mutableStateOf<List<EmbyItem>>(emptyList()) }
     var selectedSeasonId by remember { mutableStateOf<String?>(null) }
     var episodes by remember { mutableStateOf<List<EmbyItem>>(emptyList()) }
+    var reverseEpisodeOrder by remember { mutableStateOf(false) }
     var isLoadingSeasons by remember { mutableStateOf(true) }
     var isLoadingEpisodes by remember { mutableStateOf(false) }
+
+    val displayedEpisodes = remember(episodes, reverseEpisodeOrder) {
+        if (reverseEpisodeOrder) episodes.reversed() else episodes
+    }
 
     LaunchedEffect(seriesItem.id, baseUrl) {
         isLoadingSeasons = true
@@ -849,6 +987,26 @@ private fun EmbySeriesScreen(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "뒤로")
+                    }
+                },
+                actions = {
+                    FilledTonalButton(
+                        onClick = { reverseEpisodeOrder = !reverseEpisodeOrder },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier
+                            .padding(end = 8.dp)
+                            .height(34.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.SwapVert,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (reverseEpisodeOrder) "최신화부터" else "1화부터",
+                            style = MaterialTheme.typography.labelMedium
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -925,7 +1083,7 @@ private fun EmbySeriesScreen(
                     }
                 }
             } else {
-                items(episodes, key = { it.id }) { ep ->
+                items(displayedEpisodes, key = { it.id }) { ep ->
                     EmbyEpisodeRowCard(
                         episode = ep,
                         onClick = { onOpenEpisode(ep) },

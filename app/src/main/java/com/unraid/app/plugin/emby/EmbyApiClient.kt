@@ -154,18 +154,19 @@ class EmbyApiClient(
     }
 
     /**
-     * 특정 라이브러리 내부 아이템 그리드 조회
+     * 특정 라이브러리 내부 아이템 그리드 조회 (선택한 정렬 옵션 적용)
      */
     suspend fun fetchLibraryItems(
         baseUrl: String,
         userId: String,
         accessToken: String,
-        libraryId: String
+        libraryId: String,
+        sortOption: EmbySortOption = EmbySortOption.NAME_ASC
     ): Result<List<EmbyItem>> {
         val url = "$baseUrl/Users/$userId/Items" +
             "?ParentId=$libraryId&Recursive=true&IncludeItemTypes=Movie,Series,Video" +
-            "&SortBy=DateCreated,SortName&SortOrder=Descending&Limit=100" +
-            "&Fields=PrimaryImageAspectRatio,Overview,ProductionYear,UserData,RunTimeTicks"
+            "&SortBy=${sortOption.sortBy}&SortOrder=${sortOption.sortOrder}&Limit=200" +
+            "&Fields=PrimaryImageAspectRatio,Overview,ProductionYear,PremiereDate,CommunityRating,UserData,RunTimeTicks"
         return fetchItemListFromItemsWrapper(url, baseUrl, accessToken, "Emby 라이브러리 항목 조회")
     }
 
@@ -213,6 +214,30 @@ class EmbyApiClient(
             "?SeasonId=$seasonId&UserId=$userId" +
             "&Fields=Overview,PrimaryImageAspectRatio,MediaSources,UserData,RunTimeTicks,SeriesName,ParentIndexNumber,IndexNumber"
         return fetchItemListFromItemsWrapper(url, baseUrl, accessToken, "Emby 에피소드 목록 조회")
+    }
+
+    /**
+     * 플레이어 내 이전화/다음화 즉시 전환을 위해 시리즈 전체 에피소드 목록을 정순으로 조회합니다.
+     */
+    suspend fun fetchAllSeriesEpisodes(
+        baseUrl: String,
+        userId: String,
+        accessToken: String,
+        seriesId: String
+    ): Result<List<EmbyItem>> {
+        val url = "$baseUrl/Shows/$seriesId/Episodes" +
+            "?UserId=$userId" +
+            "&Fields=Overview,PrimaryImageAspectRatio,MediaSources,UserData,RunTimeTicks,SeriesName,ParentIndexNumber,IndexNumber"
+        return fetchItemListFromItemsWrapper(url, baseUrl, accessToken, "Emby 전체 에피소드 조회")
+            .map { list ->
+                list.sortedWith(
+                    compareBy<EmbyItem>(
+                        // 스페셜(시즌 0)이 있을 경우 정규 시즌(1, 2, ...) 뒤에 배치해 자연스러운 연속 재생 지원
+                        { if ((it.seasonNumber ?: 0) == 0) Int.MAX_VALUE else (it.seasonNumber ?: 0) },
+                        { it.episodeNumber ?: Int.MAX_VALUE }
+                    )
+                )
+            }
     }
 
     /**
