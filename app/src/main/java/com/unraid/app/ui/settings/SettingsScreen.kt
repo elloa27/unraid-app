@@ -25,17 +25,22 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.FolderZip
+import androidx.compose.material.icons.filled.FontDownload
 import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.SystemUpdateAlt
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.VpnLock
@@ -68,6 +73,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -87,11 +93,15 @@ import com.unraid.app.data.model.ConnectionMode
 import com.unraid.app.data.model.DockerServiceBookmark
 import com.unraid.app.data.model.ErrorLogEntry
 import com.unraid.app.data.model.RoutePhase
-import com.unraid.app.plugin.ServicePluginRegistry
+import com.unraid.app.player.MpvFontStorage
+import com.unraid.app.player.PlayerSettingsStore
+import com.unraid.app.plugin.ExternalPluginManager
+import com.unraid.app.plugin.InstalledPlugin
 import com.unraid.app.ui.theme.StatusAmber
 import com.unraid.app.ui.theme.StatusBlue
 import com.unraid.app.ui.theme.StatusGreen
 import com.unraid.app.ui.theme.StatusRed
+import kotlinx.coroutines.launch
 
 /**
  * 설정 및 자체 에러 로그 화면.
@@ -104,6 +114,8 @@ import com.unraid.app.ui.theme.StatusRed
 @Composable
 fun SettingsScreen(
     viewModel: SettingsViewModel,
+    externalPluginManager: ExternalPluginManager,
+    playerSettingsStore: PlayerSettingsStore,
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -112,8 +124,11 @@ fun SettingsScreen(
     val allowSelfSignedSsl by viewModel.allowSelfSignedSsl.collectAsStateWithLifecycle()
     val connectionMode by viewModel.connectionMode.collectAsStateWithLifecycle()
     val connectionStatus by viewModel.connectionStatus.collectAsStateWithLifecycle()
+    val installedPlugins by externalPluginManager.installedPlugins.collectAsStateWithLifecycle()
+    val playerSettings by playerSettingsStore.settingsFlow.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
     var showApiKey by remember { mutableStateOf(false) }
@@ -124,12 +139,68 @@ fun SettingsScreen(
     var showResetTsDialog by remember { mutableStateOf(false) }
     var showErrorLogsDialog by remember { mutableStateOf(false) }
 
+    // 외부 플러그인 관리 UI 상태
+    var isPluginBusy by remember { mutableStateOf(false) }
+    var showInstallUrlDialog by remember { mutableStateOf(false) }
+    var deletingPlugin by remember { mutableStateOf<InstalledPlugin?>(null) }
+
+    // 내장 libmpv 자막 폰트 UI 상태
+    var installedFonts by remember { mutableStateOf(MpvFontStorage.listInstalledFonts(context)) }
+    var subtitleFontNameInput by remember(playerSettings.subtitleFontName) {
+        mutableStateOf(playerSettings.subtitleFontName)
+    }
+    var forceSubtitleFontOnAss by remember(playerSettings.forceSubtitleFontOnAss) {
+        mutableStateOf(playerSettings.forceSubtitleFontOnAss)
+    }
+
     // Android 10+ Wi-Fi SSID 감지를 위한 위치 권한 요청 런처
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { grants ->
         val fineGranted = grants[Manifest.permission.ACCESS_FINE_LOCATION] == true
         viewModel.onLocationPermissionResult(fineGranted)
+    }
+
+    // 로컬 .zip 파일 선택기(OpenDocument)
+    val pluginZipPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            isPluginBusy = true
+            coroutineScope.launch {
+                val result = externalPluginManager.installFromUri(uri)
+                isPluginBusy = false
+                result.onSuccess { installed ->
+                    viewModel.showMessage("'${installed.name}' v${installed.version} 플러그인이 설치되었습니다.")
+                }.onFailure { err ->
+                    viewModel.showMessage(err.localizedMessage ?: "ZIP 플러그인 설치에 실패했습니다.")
+                }
+            }
+        }
+    }
+
+    // 자막 폰트 파일(.ttf / .otf / .ttc) 다중 선택기
+    val fontPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            var successCount = 0
+            var lastError: String? = null
+            uris.forEach { uri ->
+                MpvFontStorage.importFontUri(context, uri)
+                    .onSuccess { successCount += 1 }
+                    .onFailure { lastError = it.localizedMessage }
+            }
+            installedFonts = MpvFontStorage.listInstalledFonts(context)
+            when {
+                successCount > 0 && lastError == null ->
+                    viewModel.showMessage("자막 폰트 ${successCount}개가 추가되었습니다.")
+                successCount > 0 ->
+                    viewModel.showMessage("폰트 ${successCount}개 추가 완료 (일부 오류: $lastError)")
+                else ->
+                    viewModel.showMessage(lastError ?: "자막 폰트 추가에 실패했습니다.")
+            }
+        }
     }
 
     LaunchedEffect(uiState.feedbackMessage) {
@@ -686,9 +757,8 @@ fun SettingsScreen(
                 }
             }
 
-            // 4. 서비스별 전용 UI 플러그인 설정 카드 (ServicePluginRegistry 자동 연동)
-            item(key = "service_plugins_card") {
-                val plugins = remember { ServicePluginRegistry.allPlugins() }
+            // 4. 외부 플러그인 관리 카드 (.zip 파일 / URL 동적 설치·업데이트·삭제)
+            item(key = "external_plugins_card") {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                     shape = RoundedCornerShape(16.dp)
@@ -704,13 +774,13 @@ fun SettingsScreen(
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(
-                                    imageVector = Icons.Filled.AutoAwesome,
+                                    imageVector = Icons.Filled.Extension,
                                     contentDescription = null,
                                     tint = MaterialTheme.colorScheme.primary
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = "플러그인별 설정 (전용 네이티브 UI)",
+                                    text = "외부 플러그인 관리",
                                     style = MaterialTheme.typography.titleMedium
                                 )
                             }
@@ -719,7 +789,7 @@ fun SettingsScreen(
                                 shape = RoundedCornerShape(8.dp)
                             ) {
                                 Text(
-                                    text = "${plugins.size}개 등록",
+                                    text = "${installedPlugins.size}개 설치됨",
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -727,14 +797,74 @@ fun SettingsScreen(
                             }
                         }
 
-                        if (plugins.isEmpty()) {
+                        Text(
+                            text = "앱을 다시 빌드하지 않고도 .zip 패키지나 원격 URL로 서비스 전용 UI 플러그인을 설치·업데이트할 수 있습니다.",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    pluginZipPickerLauncher.launch(
+                                        arrayOf("application/zip", "application/octet-stream", "*/*")
+                                    )
+                                },
+                                enabled = !isPluginBusy,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.FolderZip,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("ZIP 파일로 설치")
+                            }
+
+                            OutlinedButton(
+                                onClick = { showInstallUrlDialog = true },
+                                enabled = !isPluginBusy,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.CloudDownload,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("URL로 설치")
+                            }
+                        }
+
+                        if (isPluginBusy) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Text(
+                                    text = "플러그인 패키지를 처리하는 중...",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+
+                        if (installedPlugins.isEmpty()) {
                             Text(
-                                text = "현재 등록된 전용 UI 플러그인이 없습니다. 다음 단계에서 Emby(libmpv) 등 서비스별 플러그인을 등록하면 이 영역에 전용 설정이 자동으로 표시됩니다.",
+                                text = "설치된 외부 플러그인이 없습니다. 위 버튼으로 manifest.json이 포함된 .zip 패키지를 설치해 주세요.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         } else {
-                            plugins.forEachIndexed { index, plugin ->
+                            installedPlugins.forEachIndexed { index, plugin ->
                                 if (index > 0) {
                                     HorizontalDivider(
                                         color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
@@ -742,36 +872,285 @@ fun SettingsScreen(
                                 }
                                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                     Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text(
-                                            text = plugin.displayName,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                        Surface(
-                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
-                                            shape = RoundedCornerShape(6.dp)
+                                        Row(
+                                            modifier = Modifier.weight(1f),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                                         ) {
                                             Text(
-                                                text = plugin.badgeLabel,
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                                style = MaterialTheme.typography.labelMedium,
-                                                color = MaterialTheme.colorScheme.primary
+                                                text = plugin.name,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
                                             )
+                                            Surface(
+                                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                                                shape = RoundedCornerShape(6.dp)
+                                            ) {
+                                                Text(
+                                                    text = "v${plugin.version}",
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                        }
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            val updateUrl = plugin.manifest.updateUrl?.takeIf { it.isNotBlank() }
+                                            if (updateUrl != null) {
+                                                IconButton(
+                                                    onClick = {
+                                                        isPluginBusy = true
+                                                        coroutineScope.launch {
+                                                            val result = externalPluginManager.installFromUrl(updateUrl)
+                                                            isPluginBusy = false
+                                                            result.onSuccess { updated ->
+                                                                viewModel.showMessage(
+                                                                    "'${updated.name}' v${updated.version} 업데이트가 완료되었습니다."
+                                                                )
+                                                            }.onFailure { err ->
+                                                                viewModel.showMessage(
+                                                                    err.localizedMessage ?: "플러그인 업데이트에 실패했습니다."
+                                                                )
+                                                            }
+                                                        }
+                                                    },
+                                                    enabled = !isPluginBusy
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Filled.SystemUpdateAlt,
+                                                        contentDescription = "업데이트",
+                                                        tint = MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
+                                            }
+                                            IconButton(
+                                                onClick = { deletingPlugin = plugin },
+                                                enabled = !isPluginBusy
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Filled.Delete,
+                                                    contentDescription = "플러그인 삭제",
+                                                    tint = StatusRed
+                                                )
+                                            }
                                         }
                                     }
+
                                     Text(
-                                        text = plugin.description,
+                                        text = "ID: ${plugin.id} · ${plugin.matchSummaryText()}",
                                         style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        color = MaterialTheme.colorScheme.primary
                                     )
-                                    if (plugin.hasSettings) {
-                                        plugin.SettingsContent()
+                                    if (plugin.description.isNotBlank()) {
+                                        Text(
+                                            text = plugin.description,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // 5. 내장 비디오 플레이어(libmpv) 전역 설정 카드
+            item(key = "native_mpv_settings_card") {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Filled.PlayCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "내장 비디오 플레이어 (libmpv)",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "하드웨어 디코딩 우선 사용 (hwdec)",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = "재생 화면 우측 상단에서 SW/HW 실시간 전환도 가능합니다.",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = playerSettings.preferHardwareDecoding,
+                                onCheckedChange = { enabled ->
+                                    playerSettingsStore.setPreferHardwareDecoding(enabled)
+                                }
+                            )
+                        }
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "자막 폰트 파일 (.ttf / .otf / .ttc)",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = "ASS/SSA 자막과 일반 자막(SRT)에 libmpv가 사용할 폰트를 추가하세요.",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            FilledTonalButton(
+                                onClick = {
+                                    fontPickerLauncher.launch(
+                                        arrayOf(
+                                            "font/ttf",
+                                            "font/otf",
+                                            "application/x-font-ttf",
+                                            "application/x-font-otf",
+                                            "application/octet-stream",
+                                            "*/*"
+                                        )
+                                    )
+                                },
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.FontDownload,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("폰트 추가")
+                            }
+                        }
+
+                        if (installedFonts.isEmpty()) {
+                            Text(
+                                text = "등록된 커스텀 자막 폰트가 없습니다.",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            installedFonts.forEach { fontFile ->
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = fontFile.name,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            modifier = Modifier.weight(1f),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        IconButton(
+                                            onClick = {
+                                                MpvFontStorage.deleteFont(fontFile)
+                                                installedFonts = MpvFontStorage.listInstalledFonts(context)
+                                                viewModel.showMessage("폰트 '${fontFile.name}'을(를) 삭제했습니다.")
+                                            },
+                                            modifier = Modifier.size(32.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Filled.Delete,
+                                                contentDescription = "폰트 삭제",
+                                                tint = StatusRed,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        OutlinedTextField(
+                            value = subtitleFontNameInput,
+                            onValueChange = { subtitleFontNameInput = it },
+                            label = { Text("기본 자막 폰트 이름 (sub-font, 선택)") },
+                            placeholder = { Text("예: NanumGothic, Pretendard, Noto Sans CJK KR") },
+                            supportingText = {
+                                Text("비워두면 ASS 자막 자체 폰트 스타일을 그대로 따릅니다.")
+                            },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "ASS 자막에도 입력한 폰트 강제 적용",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = "켜면 ASS 내부 스타일의 폰트명을 위 폰트로 덮어씁니다.",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = forceSubtitleFontOnAss,
+                                onCheckedChange = { forceSubtitleFontOnAss = it }
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                playerSettingsStore.saveSubtitleFontSettings(
+                                    fontName = subtitleFontNameInput,
+                                    forceOnAss = forceSubtitleFontOnAss
+                                )
+                                viewModel.showMessage("내장 플레이어 자막 폰트 설정이 저장되었습니다.")
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Save,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("자막 폰트 설정 저장")
                         }
                     }
                 }
@@ -881,7 +1260,7 @@ fun SettingsScreen(
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            text = "내장 Tailscale(tsnet arm64) + 홈 Wi-Fi 자동 전환 지원",
+                            text = "내장 Tailscale(tsnet arm64) · 외부 플러그인 엔진 · libmpv 플레이어 지원",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -977,6 +1356,63 @@ fun SettingsScreen(
         )
     }
 
+    // 외부 플러그인 URL 설치 다이얼로그
+    if (showInstallUrlDialog) {
+        InstallPluginUrlDialog(
+            onDismiss = { showInstallUrlDialog = false },
+            onConfirm = { rawUrl ->
+                showInstallUrlDialog = false
+                isPluginBusy = true
+                coroutineScope.launch {
+                    val result = externalPluginManager.installFromUrl(rawUrl)
+                    isPluginBusy = false
+                    result.onSuccess { installed ->
+                        viewModel.showMessage("'${installed.name}' v${installed.version} 플러그인이 설치되었습니다.")
+                    }.onFailure { err ->
+                        viewModel.showMessage(err.localizedMessage ?: "URL 플러그인 설치에 실패했습니다.")
+                    }
+                }
+            }
+        )
+    }
+
+    // 외부 플러그인 삭제 확인 다이얼로그
+    deletingPlugin?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deletingPlugin = null },
+            title = { Text("외부 플러그인 삭제") },
+            text = {
+                Text(
+                    "'${target.name}' (v${target.version}) 플러그인과 해당 플러그인이 저장한 로그인/설정 데이터를 함께 삭제할까요?"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        deletingPlugin = null
+                        isPluginBusy = true
+                        coroutineScope.launch {
+                            val result = externalPluginManager.uninstallPlugin(target.id)
+                            isPluginBusy = false
+                            result.onSuccess {
+                                viewModel.showMessage("'${target.name}' 플러그인이 삭제되었습니다.")
+                            }.onFailure { err ->
+                                viewModel.showMessage(err.localizedMessage ?: "플러그인 삭제에 실패했습니다.")
+                            }
+                        }
+                    }
+                ) {
+                    Text("삭제", color = StatusRed)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deletingPlugin = null }) {
+                    Text("취소")
+                }
+            }
+        )
+    }
+
     // 에러 로그 상세 보기 모달
     if (showErrorLogsDialog) {
         ErrorLogsDialog(
@@ -993,6 +1429,50 @@ fun SettingsScreen(
             onDismiss = { showErrorLogsDialog = false }
         )
     }
+}
+
+@Composable
+private fun InstallPluginUrlDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (url: String) -> Unit
+) {
+    var url by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("URL로 외부 플러그인 설치") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "GitHub Releases 등의 .zip 파일 직링크(http:// 또는 https://)를 입력하세요. 동일 ID 플러그인이 있으면 자동으로 업데이트됩니다.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    label = { Text("플러그인 ZIP URL") },
+                    placeholder = { Text("https://example.com/emby-plugin.zip") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(url.trim()) },
+                enabled = url.trim().startsWith("http://", ignoreCase = true) ||
+                    url.trim().startsWith("https://", ignoreCase = true)
+            ) {
+                Text("설치")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("취소")
+            }
+        }
+    )
 }
 
 @Composable

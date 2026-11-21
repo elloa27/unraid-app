@@ -30,3 +30,15 @@
 
 # libmpv JNI 바인딩 유지
 -keep class dev.jdtech.mpv.** { *; }
+
+# 외부 플러그인 직렬화 모델 및 @JavascriptInterface 유지
+-keep,includedescriptorclasses class com.unraid.app.plugin.**$$serializer { *; }
+-keepclassmembers class com.unraid.app.plugin.** {
+    *** Companion;
+}
+-keepclasseswithmembers class com.unraid.app.plugin.** {
+    kotlinx.serialization.KSerializer serializer(...);
+}
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}

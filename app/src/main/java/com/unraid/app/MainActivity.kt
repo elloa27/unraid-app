@@ -57,7 +57,10 @@ class MainActivity : ComponentActivity() {
                     dashboardViewModel = dashboardViewModel,
                     settingsViewModel = settingsViewModel,
                     preferencesRepository = unraidApp.preferencesRepository,
-                    webViewPoolManager = webViewPoolManager
+                    webViewPoolManager = webViewPoolManager,
+                    externalPluginManager = unraidApp.externalPluginManager,
+                    pluginStorageVault = unraidApp.pluginStorageVault,
+                    playerSettingsStore = unraidApp.playerSettingsStore
                 )
             }
         }

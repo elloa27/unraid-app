@@ -6,6 +6,7 @@ import androidx.webkit.ProxyConfig
 import androidx.webkit.ProxyController
 import androidx.webkit.WebViewFeature
 import com.unraid.app.data.local.AppErrorLogger
+import com.unraid.app.plugin.InstalledPlugin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -132,6 +133,7 @@ object NetworkProxyManager {
                         .addProxyRule(config.toWebViewProxyRule())
                         .addBypassRule("127.0.0.1")
                         .addBypassRule("localhost")
+                        .addBypassRule(InstalledPlugin.PLUGIN_VIRTUAL_HOST)
                         .build()
 
                     controller.setProxyOverride(webViewProxyConfig, mainExecutor) {

@@ -24,8 +24,14 @@ import com.unraid.app.data.local.AppPreferencesRepository
 import com.unraid.app.data.model.AutoDockerOverride
 import com.unraid.app.data.model.DockerContainerItem
 import com.unraid.app.data.model.WebServiceSource
+import com.unraid.app.network.NetworkProxyManager
+import com.unraid.app.player.PlayerSettingsStore
+import com.unraid.app.plugin.ExternalPluginManager
+import com.unraid.app.plugin.InstalledPlugin
 import com.unraid.app.plugin.LauncherService
-import com.unraid.app.plugin.ServicePluginRegistry
+import com.unraid.app.plugin.PluginBridgeContext
+import com.unraid.app.plugin.PluginRuntimeScreen
+import com.unraid.app.plugin.PluginStorageVault
 import com.unraid.app.ui.dashboard.DashboardScreen
 import com.unraid.app.ui.dashboard.DashboardViewModel
 import com.unraid.app.ui.navigation.AppDestination
@@ -35,22 +41,26 @@ import com.unraid.app.ui.webview.DockerWebLauncherScreen
 import com.unraid.app.ui.webview.FullScreenDockerWebView
 import com.unraid.app.ui.webview.WebViewPoolManager
 import kotlinx.coroutines.launch
+import java.net.URI
 
 private enum class ActiveLaunchMode {
     WEBVIEW,
-    NATIVE_PLUGIN
+    EXTERNAL_PLUGIN
 }
 
 /**
  * 하단 내비게이션 바, 아이콘 그리드 런처, 100% 전체 화면(PWA) 웹뷰,
- * 그리고 서비스별 전용 네이티브 UI 플러그인 전환을 총괄하는 최상위 화면.
+ * 그리고 동적 외부 플러그인 런타임(WebView + window.UnraidHub + 내장 libmpv)을 총괄하는 최상위 화면.
  */
 @Composable
 fun MainScreen(
     dashboardViewModel: DashboardViewModel,
     settingsViewModel: SettingsViewModel,
     preferencesRepository: AppPreferencesRepository,
-    webViewPoolManager: WebViewPoolManager
+    webViewPoolManager: WebViewPoolManager,
+    externalPluginManager: ExternalPluginManager,
+    pluginStorageVault: PluginStorageVault,
+    playerSettingsStore: PlayerSettingsStore
 ) {
     var currentTab by rememberSaveable { mutableStateOf(AppDestination.DASHBOARD) }
     var activeSessionServiceId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -64,6 +74,12 @@ fun MainScreen(
         .collectAsStateWithLifecycle(initialValue = emptySet())
     val autoDockerOverrides by preferencesRepository.autoDockerOverridesFlow
         .collectAsStateWithLifecycle(initialValue = emptyMap())
+    val unraidServerUrl by preferencesRepository.unraidServerUrlFlow
+        .collectAsStateWithLifecycle(initialValue = "")
+    val tailscaleServerUrl by preferencesRepository.tailscaleServerUrlFlow
+        .collectAsStateWithLifecycle(initialValue = "")
+    val installedPlugins by externalPluginManager.installedPlugins.collectAsStateWithLifecycle()
+    val proxyConfig by NetworkProxyManager.proxyConfig.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
 
     val allDetectedContainers = dashboardUiState.data?.containers.orEmpty()
@@ -125,9 +141,9 @@ fun MainScreen(
     }
 
     val launchDefault: (LauncherService) -> Unit = { service ->
-        val matchingPlugin = ServicePluginRegistry.findMatchingPlugin(service)
+        val matchingPlugin = installedPlugins.firstOrNull { it.matches(service) }
         val targetMode = if (matchingPlugin != null && service.preferNativeUi) {
-            ActiveLaunchMode.NATIVE_PLUGIN
+            ActiveLaunchMode.EXTERNAL_PLUGIN
         } else {
             ActiveLaunchMode.WEBVIEW
         }
@@ -175,20 +191,49 @@ fun MainScreen(
     }
 
     if (activeSessionService != null) {
-        val matchingPlugin = remember(activeSessionService) {
-            ServicePluginRegistry.findMatchingPlugin(activeSessionService)
+        val matchingPlugin: InstalledPlugin? = remember(activeSessionService, installedPlugins) {
+            installedPlugins.firstOrNull { it.matches(activeSessionService) }
         }
 
-        if (activeLaunchMode == ActiveLaunchMode.NATIVE_PLUGIN && matchingPlugin != null) {
-            // 서비스 전용 네이티브 UI 플러그인 진입 (예: 3단계 Emby libmpv 플레이어)
-            matchingPlugin.Content(
-                service = activeSessionService,
+        if (activeLaunchMode == ActiveLaunchMode.EXTERNAL_PLUGIN && matchingPlugin != null) {
+            val bridgeContext = remember(
+                matchingPlugin.id,
+                matchingPlugin.version,
+                activeSessionService,
+                unraidServerUrl,
+                tailscaleServerUrl,
+                proxyConfig.isActive
+            ) {
+                buildPluginBridgeContext(
+                    plugin = matchingPlugin,
+                    service = activeSessionService,
+                    unraidServerUrl = unraidServerUrl,
+                    tailscaleServerUrl = tailscaleServerUrl,
+                    isTailscaleActive = proxyConfig.isActive
+                )
+            }
+
+            // 설치된 외부 플러그인 런타임 실행 (가상 HTTPS 도메인 + window.UnraidHub + 내장 libmpv)
+            PluginRuntimeScreen(
+                plugin = matchingPlugin,
+                bridgeContext = bridgeContext,
+                pluginsRootDir = externalPluginManager.getPluginsRootDir(),
+                storageVault = pluginStorageVault,
+                playerSettingsStore = playerSettingsStore,
                 onOpenWebViewFallback = {
                     activeLaunchMode = ActiveLaunchMode.WEBVIEW
                 },
-                onExit = {
+                onNavigateToDashboard = {
+                    activeSessionServiceId = null
+                    currentTab = AppDestination.DASHBOARD
+                },
+                onExitToLauncher = {
                     activeSessionServiceId = null
                     currentTab = AppDestination.DOCKER_WEBVIEW
+                },
+                onNavigateToSettings = {
+                    activeSessionServiceId = null
+                    currentTab = AppDestination.SETTINGS
                 }
             )
         } else {
@@ -196,10 +241,11 @@ fun MainScreen(
             FullScreenDockerWebView(
                 activeService = activeSessionService,
                 quickSwitchServices = quickSwitchServices,
+                installedPlugins = installedPlugins,
                 webViewPoolManager = webViewPoolManager,
                 onSelectService = { target -> launchDefault(target) },
-                onOpenNativePlugin = if (matchingPlugin != null) {
-                    { activeLaunchMode = ActiveLaunchMode.NATIVE_PLUGIN }
+                onOpenPlugin = if (matchingPlugin != null) {
+                    { activeLaunchMode = ActiveLaunchMode.EXTERNAL_PLUGIN }
                 } else {
                     null
                 },
@@ -267,14 +313,15 @@ fun MainScreen(
                             allDetectedContainers = allDetectedContainers,
                             pinnedAutoDockerIds = pinnedAutoDockerIds,
                             manualBookmarks = manualBookmarks,
+                            installedPlugins = installedPlugins,
                             webViewPoolManager = webViewPoolManager,
                             isRefreshingDashboard = dashboardUiState.isRefreshing || dashboardUiState.isLoading,
                             onLaunchDefault = launchDefault,
                             onLaunchWebView = { service ->
                                 launchService(service, ActiveLaunchMode.WEBVIEW)
                             },
-                            onLaunchNativePlugin = { service ->
-                                launchService(service, ActiveLaunchMode.NATIVE_PLUGIN)
+                            onLaunchPlugin = { service ->
+                                launchService(service, ActiveLaunchMode.EXTERNAL_PLUGIN)
                             },
                             onToggleAutoDockerPinned = { serviceId, pinned ->
                                 coroutineScope.launch {
@@ -337,11 +384,74 @@ fun MainScreen(
 
                     AppDestination.SETTINGS -> {
                         SettingsScreen(
-                            viewModel = settingsViewModel
+                            viewModel = settingsViewModel,
+                            externalPluginManager = externalPluginManager,
+                            playerSettingsStore = playerSettingsStore
                         )
                     }
                 }
             }
         }
     }
+}
+
+/**
+ * 서비스 주소와 Unraid Tailscale URL 설정을 바탕으로 플러그인에 전달할 컨텍스트를 구성합니다.
+ * - Tailscale용 Unraid URL이 지정돼 있고 서비스 호스트가 기본 Unraid 호스트와 같으면 Tailscale 호스트로 치환한 주소를 생성합니다.
+ * - 서브넷 라우터 환경(Tailscale용 URL 미입력)에서는 기존 서비스 URL을 그대로 사용합니다.
+ */
+private fun buildPluginBridgeContext(
+    plugin: InstalledPlugin,
+    service: LauncherService,
+    unraidServerUrl: String,
+    tailscaleServerUrl: String,
+    isTailscaleActive: Boolean
+): PluginBridgeContext {
+    val cleanServiceUrl = service.url.trim().trimEnd('/')
+    val computedTailscaleUrl = computeTailscaleServiceUrl(
+        serviceUrl = cleanServiceUrl,
+        unraidServerUrl = unraidServerUrl,
+        tailscaleServerUrl = tailscaleServerUrl
+    )
+    val activeBaseUrl = if (isTailscaleActive && computedTailscaleUrl.isNotBlank()) {
+        computedTailscaleUrl
+    } else {
+        cleanServiceUrl
+    }
+
+    return PluginBridgeContext(
+        pluginId = plugin.id,
+        pluginVersion = plugin.version,
+        serviceName = service.name,
+        serviceUrl = cleanServiceUrl,
+        tailscaleUrl = computedTailscaleUrl,
+        activeBaseUrl = activeBaseUrl,
+        isTailscaleActive = isTailscaleActive
+    )
+}
+
+private fun computeTailscaleServiceUrl(
+    serviceUrl: String,
+    unraidServerUrl: String,
+    tailscaleServerUrl: String
+): String {
+    if (tailscaleServerUrl.isBlank()) return serviceUrl
+    return runCatching {
+        val svcUri = URI(serviceUrl)
+        val tsUri = URI(tailscaleServerUrl.trim())
+        val baseUri = unraidServerUrl.trim().takeIf { it.isNotBlank() }?.let { URI(it) }
+
+        val tsHost = tsUri.host?.takeIf { it.isNotBlank() } ?: return serviceUrl
+        val svcHost = svcUri.host?.takeIf { it.isNotBlank() } ?: return serviceUrl
+        val baseHost = baseUri?.host
+
+        if (baseHost != null && svcHost.equals(baseHost, ignoreCase = true)) {
+            val scheme = svcUri.scheme ?: tsUri.scheme ?: "http"
+            val portPart = if (svcUri.port > 0) ":${svcUri.port}" else ""
+            val pathPart = svcUri.rawPath.orEmpty().trimEnd('/')
+            "$scheme://$tsHost$portPart$pathPart"
+        } else {
+            serviceUrl
+        }
+    }.getOrDefault(serviceUrl)
 }

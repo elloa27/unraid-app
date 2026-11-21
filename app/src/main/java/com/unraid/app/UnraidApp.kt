@@ -10,8 +10,9 @@ import com.unraid.app.data.local.SecureCredentialStore
 import com.unraid.app.data.remote.UnraidGraphQlClient
 import com.unraid.app.network.NetworkModule
 import com.unraid.app.network.TailscaleConnectionManager
-import com.unraid.app.plugin.emby.EmbyApiClient
-import com.unraid.app.plugin.emby.EmbyCredentialStore
+import com.unraid.app.player.PlayerSettingsStore
+import com.unraid.app.plugin.ExternalPluginManager
+import com.unraid.app.plugin.PluginStorageVault
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -39,10 +40,13 @@ class UnraidApp : Application(), ImageLoaderFactory {
     lateinit var tailscaleConnectionManager: TailscaleConnectionManager
         private set
 
-    lateinit var embyCredentialStore: EmbyCredentialStore
+    lateinit var pluginStorageVault: PluginStorageVault
         private set
 
-    lateinit var embyApiClient: EmbyApiClient
+    lateinit var externalPluginManager: ExternalPluginManager
+        private set
+
+    lateinit var playerSettingsStore: PlayerSettingsStore
         private set
 
     override fun onCreate() {
@@ -53,8 +57,13 @@ class UnraidApp : Application(), ImageLoaderFactory {
         preferencesRepository = AppPreferencesRepository(this)
         secureCredentialStore = SecureCredentialStore(this)
         unraidGraphQlClient = UnraidGraphQlClient { NetworkModule.okHttpClient }
-        embyCredentialStore = EmbyCredentialStore(this)
-        embyApiClient = EmbyApiClient { NetworkModule.okHttpClient }
+        pluginStorageVault = PluginStorageVault(this)
+        externalPluginManager = ExternalPluginManager(
+            context = this,
+            storageVault = pluginStorageVault,
+            httpClientProvider = { NetworkModule.okHttpClient }
+        )
+        playerSettingsStore = PlayerSettingsStore(this)
         tailscaleConnectionManager = TailscaleConnectionManager(
             context = this,
             preferencesRepository = preferencesRepository,

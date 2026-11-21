@@ -1,4 +1,4 @@
-package com.unraid.app.plugin.emby
+package com.unraid.app.player
 
 import android.app.Activity
 import android.content.Context
@@ -34,7 +34,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Audiotrack
@@ -46,8 +45,6 @@ import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
-import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.AlertDialog
@@ -65,12 +62,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -93,15 +88,35 @@ import com.unraid.app.data.local.AppErrorLogger
 import com.unraid.app.network.NetworkModule
 import com.unraid.app.network.NetworkProxyManager
 import dev.jdtech.mpv.MPVLib
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import java.util.Locale
+import java.util.UUID
+
+/**
+ * 플러그인(window.UnraidHub.playVideo)에서 전달하는 외부 자막 트랙 정보
+ */
+data class MpvSubtitleRequest(
+    val url: String,
+    val title: String = "",
+    val language: String = "und"
+)
+
+/**
+ * 플러그인(window.UnraidHub.playVideo)에서 전달하는 범용 libmpv 재생 요청 모델
+ */
+data class MpvPlayRequest(
+    val sessionId: String = UUID.randomUUID().toString(),
+    val url: String,
+    val title: String = "",
+    val subtitle: String = "",
+    val startPositionSec: Double = 0.0,
+    val headers: Map<String, String> = emptyMap(),
+    val subtitles: List<MpvSubtitleRequest> = emptyList()
+)
 
 private data class MpvTrackInfo(
     val id: Int,
-    val type: String, // audio, sub
+    val type: String,
     val title: String,
     val lang: String,
     val selected: Boolean,
@@ -117,82 +132,24 @@ private data class MpvTrackInfo(
         }.joinToString(" · ").ifBlank { "트랙 #$id" }
 }
 
-private enum class ActivePlayerDialog {
-    NONE, AUDIO, SUBTITLE, SPEED, EPISODES
+private enum class MpvDialogType {
+    NONE, AUDIO, SUBTITLE, SPEED
 }
 
 /**
- * 이전화/다음화 전환 시 화면 회전 깜박임 없이 가로 몰입 모드를 유지하면서
- * 개별 에피소드의 libmpv 세션만 깔끔하게 교체하는 상위 호스트 Composable.
+ * 메인 앱에 내장된 범용 libmpv + SurfaceView 전체 화면(가로 몰입 모드) 네이티브 비디오 플레이어.
+ *
+ * - 내장 Tailscale(tsnet) 로컬 프록시(http-proxy) 및 자체 서명 SSL 허용(tls-verify=no) 자동 연동
+ * - 하드웨어 디코딩(hwdec=auto-safe) / 소프트웨어 디코딩 실시간 전환
+ * - libass ASS/SSA 렌더링, 앱 내 커스텀 폰트 폴더(sub-fonts-dir), 외부 자막 URL(sub-add) 지원
+ * - 10초 주기 onProgress(positionSec, durationSec) 및 종료 시 onClosed(positionSec, durationSec, completed) 콜백 전달
  */
 @Composable
-fun MpvPlayerSessionHost(
-    request: EmbyPlaybackRequest,
-    apiClient: EmbyApiClient,
-    credentialStore: EmbyCredentialStore,
-    previousEpisode: EmbyItem?,
-    nextEpisode: EmbyItem?,
-    allEpisodes: List<EmbyItem>,
-    isSwitchingEpisode: Boolean,
-    onSelectEpisode: (EmbyItem) -> Unit,
-    onExit: () -> Unit
-) {
-    val context = LocalContext.current
-    val activity = remember(context) { context.findActivity() }
-
-    DisposableEffect(Unit) {
-        val previousOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        activity?.let { act ->
-            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            act.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            WindowCompat.getInsetsController(act.window, act.window.decorView).apply {
-                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                hide(WindowInsetsCompat.Type.systemBars())
-            }
-        }
-        onDispose {
-            activity?.let { act ->
-                act.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                WindowCompat.getInsetsController(act.window, act.window.decorView)
-                    .show(WindowInsetsCompat.Type.systemBars())
-                act.requestedOrientation = previousOrientation
-            }
-        }
-    }
-
-    key(request.playSessionId) {
-        MpvPlayerScreen(
-            request = request,
-            apiClient = apiClient,
-            credentialStore = credentialStore,
-            previousEpisode = previousEpisode,
-            nextEpisode = nextEpisode,
-            allEpisodes = allEpisodes,
-            isSwitchingEpisode = isSwitchingEpisode,
-            onSelectEpisode = onSelectEpisode,
-            onExit = onExit
-        )
-    }
-}
-
-/**
- * dev.jdtech.mpv.MPVLib 인스턴스 + SurfaceView 기반 Emby Direct Play 전용 전체 화면(가로) 플레이어.
- * - 내장 Tailscale(tsnet) 프록시(http-proxy) 및 사설 SSL 허용(tls-verify=no) 자동 브릿지
- * - 하드웨어(auto-safe) / 소프트웨어 디코딩 전환, libass ASS/SSA 및 외부 SRT 자막 자동 로드
- * - Emby 재생 시작 / 10초 간격 진행 / 종료 시 이어보기 위치 동기화
- * - 이전화/다음화 즉시 전환 및 회차 목록 선택, 탭 오버레이, 좌우 더블탭 ±10초, 밝기/볼륨 스와이프
- */
-@Composable
-fun MpvPlayerScreen(
-    request: EmbyPlaybackRequest,
-    apiClient: EmbyApiClient,
-    credentialStore: EmbyCredentialStore,
-    previousEpisode: EmbyItem? = null,
-    nextEpisode: EmbyItem? = null,
-    allEpisodes: List<EmbyItem> = emptyList(),
-    isSwitchingEpisode: Boolean = false,
-    onSelectEpisode: (EmbyItem) -> Unit = {},
-    onExit: () -> Unit
+fun NativeMpvPlayerScreen(
+    request: MpvPlayRequest,
+    playerSettingsStore: PlayerSettingsStore,
+    onProgress: (positionSec: Double, durationSec: Double) -> Unit,
+    onClosed: (positionSec: Double, durationSec: Double, completed: Boolean) -> Unit
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
@@ -200,41 +157,51 @@ fun MpvPlayerScreen(
         context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
-    val scope = rememberCoroutineScope()
 
     var mpvInstance by remember { mutableStateOf<MPVLib?>(null) }
     var fileLoadRequested by remember { mutableStateOf(false) }
     var externalSubsLoaded by remember { mutableStateOf(false) }
     var initError by remember { mutableStateOf<String?>(null) }
+    var reachedEof by remember { mutableStateOf(false) }
+    var closeReported by remember { mutableStateOf(false) }
 
     var isPaused by remember { mutableStateOf(false) }
     var isBuffering by remember { mutableStateOf(true) }
-    var positionSeconds by remember { mutableDoubleStateOf(request.startPositionTicks / TICKS_PER_SECOND.toDouble()) }
-    var durationSeconds by remember { mutableDoubleStateOf(request.item.runTimeTicks / TICKS_PER_SECOND.toDouble()) }
+    var positionSeconds by remember { mutableDoubleStateOf(request.startPositionSec.coerceAtLeast(0.0)) }
+    var durationSeconds by remember { mutableDoubleStateOf(0.0) }
     var isScrubbing by remember { mutableStateOf(false) }
     var scrubPosition by remember { mutableFloatStateOf(0f) }
 
     var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
     var fillScreen by remember { mutableStateOf(false) }
-    var useHardwareDecoding by remember { mutableStateOf(credentialStore.getConfig().preferHardwareDecoding) }
+    var useHardwareDecoding by remember {
+        mutableStateOf(playerSettingsStore.getSettings().preferHardwareDecoding)
+    }
     var isLocked by remember { mutableStateOf(false) }
     var controlsVisible by remember { mutableStateOf(true) }
-    var activeDialog by remember { mutableStateOf(ActivePlayerDialog.NONE) }
+    var activeDialog by remember { mutableStateOf(MpvDialogType.NONE) }
 
     var audioTracks by remember { mutableStateOf<List<MpvTrackInfo>>(emptyList()) }
     var subtitleTracks by remember { mutableStateOf<List<MpvTrackInfo>>(emptyList()) }
 
-    // 제스처 HUD 상태 (더블탭 / 밝기 / 볼륨)
     var hudText by remember { mutableStateOf<String?>(null) }
-    var hudIconType by remember { mutableStateOf<String?>(null) } // seek, brightness, volume
+    var hudIconType by remember { mutableStateOf<String?>(null) }
     var containerSize by remember { mutableStateOf(IntSize.Zero) }
 
-    // 뒤로가기 버튼 처리 (잠금 중에는 잠금 해제 안내만 표시)
+    fun finishAndNotifyClosed() {
+        if (closeReported) return
+        closeReported = true
+        val pos = positionSeconds.coerceAtLeast(0.0)
+        val dur = durationSeconds.coerceAtLeast(0.0)
+        val completed = reachedEof || (dur > 0.0 && pos >= dur * 0.90)
+        onClosed(pos, dur, completed)
+    }
+
     BackHandler(enabled = true) {
         if (isLocked) {
             controlsVisible = true
         } else {
-            onExit()
+            finishAndNotifyClosed()
         }
     }
 
@@ -265,7 +232,7 @@ fun MpvPlayerScreen(
         hudText = text
     }
 
-    // HUD 자동 숨김
+    // 제스처 HUD 자동 숨김
     LaunchedEffect(hudText) {
         if (hudText != null) {
             delay(1_100)
@@ -274,30 +241,35 @@ fun MpvPlayerScreen(
         }
     }
 
-    // 컨트롤 오버레이 자동 숨김 (재생 중 4초 후)
+    // 컨트롤 오버레이 자동 숨김
     LaunchedEffect(controlsVisible, isPaused, activeDialog, isScrubbing) {
-        if (controlsVisible && !isPaused && activeDialog == ActivePlayerDialog.NONE && !isScrubbing) {
+        if (controlsVisible && !isPaused && activeDialog == MpvDialogType.NONE && !isScrubbing) {
             delay(4_000)
             controlsVisible = false
         }
     }
 
-    // 10초 간격 Emby 재생 진행률 동기화
+    // 10초마다 플러그인에 재생 진행 상태(positionSec, durationSec) 콜백 전달
     LaunchedEffect(mpvInstance) {
         if (mpvInstance == null) return@LaunchedEffect
         while (true) {
             delay(10_000)
-            val ticks = (positionSeconds * TICKS_PER_SECOND).toLong().coerceAtLeast(0L)
-            apiClient.reportPlaybackProgress(
-                request = request,
-                positionTicks = ticks,
-                isPaused = isPaused
-            )
+            onProgress(positionSeconds.coerceAtLeast(0.0), durationSeconds.coerceAtLeast(0.0))
         }
     }
 
-    // libmpv 인스턴스 생성/초기화/해제 생명주기 (화면 방향/몰입 모드는 MpvPlayerSessionHost가 유지)
-    DisposableEffect(request.playSessionId) {
+    // 가로 몰입 모드 + libmpv 인스턴스 생명주기
+    DisposableEffect(request.sessionId) {
+        val previousOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        activity?.let { act ->
+            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            act.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            WindowCompat.getInsetsController(act.window, act.window.decorView).apply {
+                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                hide(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+
         var createdMpv: MPVLib? = null
 
         val observer = object : MPVLib.EventObserver {
@@ -314,6 +286,7 @@ fun MpvPlayerScreen(
                     when (property) {
                         "pause" -> isPaused = value
                         "paused-for-cache" -> isBuffering = value
+                        "eof-reached" -> if (value) reachedEof = true
                     }
                 }
             }
@@ -335,32 +308,35 @@ fun MpvPlayerScreen(
                         MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> {
                             isBuffering = false
                             val mpv = createdMpv
-                            // Emby 외부 SRT/ASS 자막 자동 로드
-                            if (mpv != null && !externalSubsLoaded && request.externalSubtitles.isNotEmpty()) {
+                            if (mpv != null && !externalSubsLoaded && request.subtitles.isNotEmpty()) {
                                 externalSubsLoaded = true
-                                request.externalSubtitles.forEach { sub ->
-                                    runCatching {
-                                        mpv.command(
-                                            arrayOf("sub-add", sub.url, "auto", sub.title, sub.language)
-                                        )
-                                    }.onFailure { e ->
-                                        AppErrorLogger.logError(
-                                            tag = "EmbyMpv",
-                                            message = "외부 자막 로드 실패 (${sub.title})",
-                                            throwable = e
-                                        )
+                                request.subtitles.forEach { sub ->
+                                    if (sub.url.isNotBlank()) {
+                                        runCatching {
+                                            mpv.command(
+                                                arrayOf(
+                                                    "sub-add",
+                                                    sub.url,
+                                                    "auto",
+                                                    sub.title.ifBlank { "외부 자막" },
+                                                    sub.language.ifBlank { "und" }
+                                                )
+                                            )
+                                        }.onFailure { e ->
+                                            AppErrorLogger.logError(
+                                                tag = "NativeMpv",
+                                                message = "외부 자막 로드 실패 (${sub.title})",
+                                                throwable = e
+                                            )
+                                        }
                                     }
                                 }
                             }
                             refreshTracks(mpv)
-                            scope.launch {
-                                apiClient.reportPlaybackStarted(request)
-                            }
                         }
 
                         MPVLib.MpvEvent.MPV_EVENT_END_FILE -> {
                             isBuffering = false
-                            // 영상이 끝났을 때 다음화 버튼 등을 바로 누를 수 있도록 컨트롤 표시
                             controlsVisible = true
                         }
                     }
@@ -372,10 +348,7 @@ fun MpvPlayerScreen(
             override fun logMessage(prefix: String, level: Int, text: String) {
                 if (level <= MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR && text.isNotBlank()) {
                     val trimmed = text.trim()
-                    AppErrorLogger.logError(
-                        tag = "EmbyMpv/$prefix",
-                        message = trimmed
-                    )
+                    AppErrorLogger.logError(tag = "NativeMpv/$prefix", message = trimmed)
                     if (level <= MPVLib.MpvLogLevel.MPV_LOG_LEVEL_FATAL) {
                         mainHandler.post {
                             if (initError == null) {
@@ -392,9 +365,8 @@ fun MpvPlayerScreen(
                 ?: throw IllegalStateException("MPVLib.create()가 null을 반환했습니다.")
             createdMpv = mpv
 
-            // 비디오/오디오/자막(libass) 기본 옵션
-            val embyConfig = credentialStore.getConfig()
-            val fontsDir = EmbyFontStorage.getFontsDir(context)
+            val playerSettings = playerSettingsStore.getSettings()
+            val fontsDir = MpvFontStorage.getFontsDir(context)
 
             mpv.setOptionString("vo", "gpu")
             mpv.setOptionString("gpu-context", "android")
@@ -405,19 +377,17 @@ fun MpvPlayerScreen(
             mpv.setOptionString("embeddedfonts", "yes")
             mpv.setOptionString("sub-ass", "yes")
 
-            // 사용자가 앱에 추가한 커스텀 폰트(.ttf/.otf/.ttc) 폴더를 libass에 등록
+            // 앱 내 커스텀 폰트(.ttf/.otf/.ttc) 폴더 및 사용자 폰트 설정 적용
             if (fontsDir.exists() && fontsDir.listFiles()?.isNotEmpty() == true) {
                 mpv.setOptionString("sub-fonts-dir", fontsDir.absolutePath)
             }
-
-            // 사용자 지정 기본 자막 폰트 및 ASS 강제 적용 옵션 반영
-            val customFontName = embyConfig.subtitleFontName.trim()
-            if (customFontName.isNotBlank()) {
-                mpv.setOptionString("sub-font", customFontName)
+            val customFont = playerSettings.subtitleFontName.trim()
+            if (customFont.isNotBlank()) {
+                mpv.setOptionString("sub-font", customFont)
             }
-            if (embyConfig.forceSubtitleFontOnAss && customFontName.isNotBlank()) {
+            if (playerSettings.forceSubtitleFontOnAss && customFont.isNotBlank()) {
                 mpv.setOptionString("sub-ass-override", "yes")
-                mpv.setOptionString("sub-ass-style-overrides", "FontName=$customFontName")
+                mpv.setOptionString("sub-ass-style-overrides", "FontName=$customFont")
             } else {
                 mpv.setOptionString("sub-ass-override", "no")
             }
@@ -427,7 +397,7 @@ fun MpvPlayerScreen(
             mpv.setOptionString("demuxer-max-back-bytes", "32MiB")
             mpv.setOptionString("network-timeout", "30")
 
-            // 핵심: 내장 Tailscale(tsnet) 로컬 프록시 브릿지 적용
+            // 내장 Tailscale(tsnet) 로컬 프록시 자동 브릿지
             val proxyConfig = NetworkProxyManager.proxyConfig.value
             if (proxyConfig.isActive) {
                 mpv.setOptionString("http-proxy", "http://${proxyConfig.host}:${proxyConfig.port}")
@@ -435,16 +405,25 @@ fun MpvPlayerScreen(
                 mpv.setOptionString("http-proxy", "")
             }
 
-            // 자체 서명 SSL 인증서 허용 옵션 연동
+            // 자체 서명 SSL 허용 옵션 연동
             mpv.setOptionString(
                 "tls-verify",
                 if (NetworkModule.isSelfSignedSslAllowed()) "no" else "yes"
             )
 
-            // 이어보기 시작 위치 지정
-            val startSec = request.startPositionTicks / TICKS_PER_SECOND
-            if (startSec > 1L) {
-                mpv.setOptionString("start", "+$startSec")
+            // 플러그인에서 전달한 커스텀 HTTP 헤더(인증 토큰 등) 적용
+            if (request.headers.isNotEmpty()) {
+                val headerFields = request.headers.entries
+                    .filter { it.key.isNotBlank() }
+                    .joinToString(",") { "${it.key.trim()}: ${it.value.trim()}" }
+                if (headerFields.isNotBlank()) {
+                    mpv.setOptionString("http-header-fields", headerFields)
+                }
+            }
+
+            // 시작 위치(초) 적용
+            if (request.startPositionSec >= 1.0) {
+                mpv.setOptionString("start", "+${request.startPositionSec.toLong()}")
             }
 
             mpv.init()
@@ -454,23 +433,27 @@ fun MpvPlayerScreen(
             mpv.observeProperty("duration", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
             mpv.observeProperty("pause", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
             mpv.observeProperty("paused-for-cache", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
+            mpv.observeProperty("eof-reached", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
             mpv.observeProperty("track-list/count", MPVLib.MpvFormat.MPV_FORMAT_INT64)
             mpvInstance = mpv
         } catch (t: Throwable) {
             val msg = "libmpv 플레이어 초기화 실패: ${t.localizedMessage ?: t.javaClass.simpleName}"
             initError = msg
             AppErrorLogger.logError(
-                tag = "EmbyMpv",
+                tag = "NativeMpv",
                 message = msg,
                 throwable = t,
-                extraDetails = "스트림 URL: ${request.streamUrl}"
+                extraDetails = "스트림 URL: ${request.url}"
             )
         }
 
         onDispose {
-            val finalTicks = (positionSeconds * TICKS_PER_SECOND).toLong().coerceAtLeast(0L)
-            CoroutineScope(Dispatchers.IO).launch {
-                apiClient.reportPlaybackStopped(request, finalTicks)
+            if (!closeReported) {
+                closeReported = true
+                val pos = positionSeconds.coerceAtLeast(0.0)
+                val dur = durationSeconds.coerceAtLeast(0.0)
+                val completed = reachedEof || (dur > 0.0 && pos >= dur * 0.90)
+                onClosed(pos, dur, completed)
             }
 
             createdMpv?.let { mpv ->
@@ -482,13 +465,20 @@ fun MpvPlayerScreen(
                     mpv.destroy()
                 }.onFailure { e ->
                     AppErrorLogger.logError(
-                        tag = "EmbyMpv",
+                        tag = "NativeMpv",
                         message = "libmpv 종료 정리 중 오류 발생",
                         throwable = e
                     )
                 }
             }
             mpvInstance = null
+
+            activity?.let { act ->
+                act.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                WindowCompat.getInsetsController(act.window, act.window.decorView)
+                    .show(WindowInsetsCompat.Type.systemBars())
+                act.requestedOrientation = previousOrientation
+            }
         }
     }
 
@@ -497,12 +487,9 @@ fun MpvPlayerScreen(
             .fillMaxSize()
             .background(Color.Black)
             .onSizeChanged { containerSize = it }
-            // 싱글 탭(오버레이 토글) 및 좌/우 더블탭(±10초 이동)
             .pointerInput(isLocked, containerSize, mpvInstance) {
                 detectTapGestures(
-                    onTap = {
-                        controlsVisible = !controlsVisible
-                    },
+                    onTap = { controlsVisible = !controlsVisible },
                     onDoubleTap = { offset ->
                         val mpv = mpvInstance ?: return@detectTapGestures
                         if (isLocked) return@detectTapGestures
@@ -525,7 +512,6 @@ fun MpvPlayerScreen(
                     }
                 )
             }
-            // 좌측 상하 스와이프(밝기), 우측 상하 스와이프(볼륨)
             .pointerInput(isLocked, containerSize) {
                 var dragStartX = 0f
                 var initialBrightness = 0.5f
@@ -555,8 +541,7 @@ fun MpvPlayerScreen(
                                 lp.screenBrightness = nextBrightness
                                 win.attributes = lp
                             }
-                            val pct = (nextBrightness * 100f).toInt()
-                            showTransientHud("brightness", "밝기 $pct%")
+                            showTransientHud("brightness", "밝기 ${(nextBrightness * 100f).toInt()}%")
                         } else {
                             val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
                             val nextVol = (initialVolume + (ratioDelta * maxVol).toInt()).coerceIn(0, maxVol)
@@ -581,12 +566,12 @@ fun MpvPlayerScreen(
                                     mpv.setPropertyString("vo", "gpu")
                                     if (!fileLoadRequested) {
                                         fileLoadRequested = true
-                                        mpv.command(arrayOf("loadfile", request.streamUrl))
+                                        mpv.command(arrayOf("loadfile", request.url))
                                     }
                                 }.onFailure { t ->
                                     val msg = "영상 Surface 연결 실패: ${t.localizedMessage ?: t.javaClass.simpleName}"
                                     initError = msg
-                                    AppErrorLogger.logError(tag = "EmbyMpv", message = msg, throwable = t)
+                                    AppErrorLogger.logError(tag = "NativeMpv", message = msg, throwable = t)
                                 }
                             }
 
@@ -613,28 +598,15 @@ fun MpvPlayerScreen(
             )
         }
 
-        // 버퍼링 또는 회차 전환 로딩 인디케이터
-        if ((isBuffering || isSwitchingEpisode) && initError == null) {
-            Column(
-                modifier = Modifier.align(Alignment.Center),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(44.dp),
-                    color = MaterialTheme.colorScheme.primary
-                )
-                if (isSwitchingEpisode) {
-                    Text(
-                        text = "회차 전환 중...",
-                        color = Color.White,
-                        style = MaterialTheme.typography.labelMedium
-                    )
-                }
-            }
+        if (isBuffering && initError == null) {
+            CircularProgressIndicator(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(44.dp),
+                color = MaterialTheme.colorScheme.primary
+            )
         }
 
-        // 초기화/재생 오류 안내
         if (!initError.isNullOrBlank()) {
             Surface(
                 modifier = Modifier
@@ -658,14 +630,14 @@ fun MpvPlayerScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         color = Color.White
                     )
-                    TextButton(onClick = onExit) {
-                        Text("뒤로 돌아가기")
+                    TextButton(onClick = { finishAndNotifyClosed() }) {
+                        Text("닫기")
                     }
                 }
             }
         }
 
-        // 제스처 중앙 HUD (밝기 / 볼륨 / ±10초)
+        // 중앙 제스처 HUD
         hudText?.let { text ->
             Surface(
                 modifier = Modifier.align(Alignment.Center),
@@ -698,7 +670,7 @@ fun MpvPlayerScreen(
             }
         }
 
-        // 컨트롤 오버레이 (잠금 상태일 때는 잠금 해제 버튼만 표시)
+        // 컨트롤 오버레이
         AnimatedVisibility(
             visible = controlsVisible,
             enter = fadeIn(),
@@ -743,14 +715,12 @@ fun MpvPlayerScreen(
                             .align(Alignment.TopCenter)
                             .fillMaxWidth()
                             .background(
-                                Brush.verticalGradient(
-                                    listOf(Color(0xCC000000), Color.Transparent)
-                                )
+                                Brush.verticalGradient(listOf(Color(0xCC000000), Color.Transparent))
                             )
                             .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        IconButton(onClick = onExit) {
+                        IconButton(onClick = { finishAndNotifyClosed() }) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                                 contentDescription = "플레이어 닫기",
@@ -759,14 +729,14 @@ fun MpvPlayerScreen(
                         }
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = request.item.name,
+                                text = request.title.ifBlank { "동영상 재생" },
                                 color = Color.White,
                                 style = MaterialTheme.typography.titleMedium,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                             val metaLine = buildList {
-                                if (request.item.displaySubtitle.isNotBlank()) add(request.item.displaySubtitle)
+                                if (request.subtitle.isNotBlank()) add(request.subtitle)
                                 add(if (useHardwareDecoding) "HW 디코딩" else "SW 디코딩")
                                 if (NetworkProxyManager.proxyConfig.value.isActive) add("Tailscale")
                             }.joinToString(" · ")
@@ -787,31 +757,12 @@ fun MpvPlayerScreen(
                         }
                     }
 
-                    // 중앙 재생 컨트롤 (이전화 / -10초 / 재생·일시정지 / +10초 / 다음화)
+                    // 중앙 재생 컨트롤
                     Row(
                         modifier = Modifier.align(Alignment.Center),
-                        horizontalArrangement = Arrangement.spacedBy(20.dp),
+                        horizontalArrangement = Arrangement.spacedBy(28.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        if (allEpisodes.size > 1 || previousEpisode != null || nextEpisode != null) {
-                            Surface(
-                                onClick = { previousEpisode?.let(onSelectEpisode) },
-                                enabled = previousEpisode != null && !isSwitchingEpisode,
-                                shape = CircleShape,
-                                color = Color(0x88000000),
-                                modifier = Modifier.size(48.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = Icons.Filled.SkipPrevious,
-                                        contentDescription = "이전화",
-                                        tint = if (previousEpisode != null) Color.White else Color(0x55FFFFFF),
-                                        modifier = Modifier.size(28.dp)
-                                    )
-                                }
-                            }
-                        }
-
                         Surface(
                             onClick = {
                                 runCatching { mpvInstance?.command(arrayOf("seek", "-10", "relative")) }
@@ -867,36 +818,15 @@ fun MpvPlayerScreen(
                                 )
                             }
                         }
-
-                        if (allEpisodes.size > 1 || previousEpisode != null || nextEpisode != null) {
-                            Surface(
-                                onClick = { nextEpisode?.let(onSelectEpisode) },
-                                enabled = nextEpisode != null && !isSwitchingEpisode,
-                                shape = CircleShape,
-                                color = Color(0x88000000),
-                                modifier = Modifier.size(48.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = Icons.Filled.SkipNext,
-                                        contentDescription = "다음화",
-                                        tint = if (nextEpisode != null) Color.White else Color(0x55FFFFFF),
-                                        modifier = Modifier.size(28.dp)
-                                    )
-                                }
-                            }
-                        }
                     }
 
-                    // 하단 시크바 및 퀵 버튼 영역
+                    // 하단 시크바 및 퀵 액션
                     Column(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .fillMaxWidth()
                             .background(
-                                Brush.verticalGradient(
-                                    listOf(Color.Transparent, Color(0xDD000000))
-                                )
+                                Brush.verticalGradient(listOf(Color.Transparent, Color(0xDD000000)))
                             )
                             .padding(horizontal = 16.dp, vertical = 10.dp)
                     ) {
@@ -908,7 +838,7 @@ fun MpvPlayerScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = formatPlayerTime(displayedPos),
+                                text = formatMpvTime(displayedPos),
                                 color = Color.White,
                                 style = MaterialTheme.typography.labelMedium
                             )
@@ -939,7 +869,7 @@ fun MpvPlayerScreen(
                                     .padding(horizontal = 10.dp)
                             )
                             Text(
-                                text = formatPlayerTime(effectiveDuration),
+                                text = formatMpvTime(effectiveDuration),
                                 color = Color.White,
                                 style = MaterialTheme.typography.labelMedium
                             )
@@ -950,35 +880,28 @@ fun MpvPlayerScreen(
                             horizontalArrangement = Arrangement.SpaceEvenly,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            if (allEpisodes.size > 1) {
-                                PlayerQuickChip(
-                                    icon = Icons.AutoMirrored.Filled.List,
-                                    label = "회차",
-                                    onClick = { activeDialog = ActivePlayerDialog.EPISODES }
-                                )
-                            }
-                            PlayerQuickChip(
+                            MpvQuickActionChip(
                                 icon = Icons.Filled.Audiotrack,
                                 label = "오디오",
                                 onClick = {
                                     refreshTracks()
-                                    activeDialog = ActivePlayerDialog.AUDIO
+                                    activeDialog = MpvDialogType.AUDIO
                                 }
                             )
-                            PlayerQuickChip(
+                            MpvQuickActionChip(
                                 icon = Icons.Filled.Subtitles,
                                 label = "자막",
                                 onClick = {
                                     refreshTracks()
-                                    activeDialog = ActivePlayerDialog.SUBTITLE
+                                    activeDialog = MpvDialogType.SUBTITLE
                                 }
                             )
-                            PlayerQuickChip(
+                            MpvQuickActionChip(
                                 icon = Icons.Filled.Speed,
                                 label = "${playbackSpeed}x",
-                                onClick = { activeDialog = ActivePlayerDialog.SPEED }
+                                onClick = { activeDialog = MpvDialogType.SPEED }
                             )
-                            PlayerQuickChip(
+                            MpvQuickActionChip(
                                 icon = Icons.Filled.AspectRatio,
                                 label = if (fillScreen) "채우기" else "맞춤",
                                 onClick = {
@@ -988,13 +911,13 @@ fun MpvPlayerScreen(
                                     }
                                 }
                             )
-                            PlayerQuickChip(
+                            MpvQuickActionChip(
                                 icon = Icons.Filled.Memory,
                                 label = if (useHardwareDecoding) "HW" else "SW",
                                 onClick = {
                                     val nextHw = !useHardwareDecoding
                                     useHardwareDecoding = nextHw
-                                    credentialStore.setPreferHardwareDecoding(nextHw)
+                                    playerSettingsStore.setPreferHardwareDecoding(nextHw)
                                     runCatching {
                                         mpvInstance?.setPropertyString("hwdec", if (nextHw) "auto-safe" else "no")
                                     }
@@ -1007,10 +930,10 @@ fun MpvPlayerScreen(
         }
     }
 
-    // 오디오 트랙 선택 다이얼로그
-    if (activeDialog == ActivePlayerDialog.AUDIO) {
+    // 오디오 트랙 선택
+    if (activeDialog == MpvDialogType.AUDIO) {
         AlertDialog(
-            onDismissRequest = { activeDialog = ActivePlayerDialog.NONE },
+            onDismissRequest = { activeDialog = MpvDialogType.NONE },
             title = { Text("오디오 트랙 선택") },
             text = {
                 if (audioTracks.isEmpty()) {
@@ -1024,7 +947,7 @@ fun MpvPlayerScreen(
                                     .clickable {
                                         runCatching { mpvInstance?.setPropertyString("aid", track.id.toString()) }
                                         refreshTracks()
-                                        activeDialog = ActivePlayerDialog.NONE
+                                        activeDialog = MpvDialogType.NONE
                                     }
                                     .padding(vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
@@ -1038,18 +961,16 @@ fun MpvPlayerScreen(
                 }
             },
             confirmButton = {
-                TextButton(onClick = { activeDialog = ActivePlayerDialog.NONE }) {
-                    Text("닫기")
-                }
+                TextButton(onClick = { activeDialog = MpvDialogType.NONE }) { Text("닫기") }
             }
         )
     }
 
-    // 자막 트랙 선택 다이얼로그 (끄기 포함)
-    if (activeDialog == ActivePlayerDialog.SUBTITLE) {
+    // 자막 트랙 선택 (끄기 포함)
+    if (activeDialog == MpvDialogType.SUBTITLE) {
         val noSubSelected = subtitleTracks.none { it.selected }
         AlertDialog(
-            onDismissRequest = { activeDialog = ActivePlayerDialog.NONE },
+            onDismissRequest = { activeDialog = MpvDialogType.NONE },
             title = { Text("자막 트랙 선택") },
             text = {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1060,7 +981,7 @@ fun MpvPlayerScreen(
                                 .clickable {
                                     runCatching { mpvInstance?.setPropertyString("sid", "no") }
                                     refreshTracks()
-                                    activeDialog = ActivePlayerDialog.NONE
+                                    activeDialog = MpvDialogType.NONE
                                 }
                                 .padding(vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -1077,7 +998,7 @@ fun MpvPlayerScreen(
                                 .clickable {
                                     runCatching { mpvInstance?.setPropertyString("sid", track.id.toString()) }
                                     refreshTracks()
-                                    activeDialog = ActivePlayerDialog.NONE
+                                    activeDialog = MpvDialogType.NONE
                                 }
                                 .padding(vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -1090,18 +1011,16 @@ fun MpvPlayerScreen(
                 }
             },
             confirmButton = {
-                TextButton(onClick = { activeDialog = ActivePlayerDialog.NONE }) {
-                    Text("닫기")
-                }
+                TextButton(onClick = { activeDialog = MpvDialogType.NONE }) { Text("닫기") }
             }
         )
     }
 
-    // 재생 속도 선택 다이얼로그 (0.5x ~ 2.0x)
-    if (activeDialog == ActivePlayerDialog.SPEED) {
+    // 재생 속도 선택 (0.5x ~ 2.0x)
+    if (activeDialog == MpvDialogType.SPEED) {
         val speeds = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
         AlertDialog(
-            onDismissRequest = { activeDialog = ActivePlayerDialog.NONE },
+            onDismissRequest = { activeDialog = MpvDialogType.NONE },
             title = { Text("재생 속도") },
             text = {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1112,7 +1031,7 @@ fun MpvPlayerScreen(
                                 .clickable {
                                     playbackSpeed = speed
                                     runCatching { mpvInstance?.setPropertyString("speed", speed.toString()) }
-                                    activeDialog = ActivePlayerDialog.NONE
+                                    activeDialog = MpvDialogType.NONE
                                 }
                                 .padding(vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -1125,64 +1044,14 @@ fun MpvPlayerScreen(
                 }
             },
             confirmButton = {
-                TextButton(onClick = { activeDialog = ActivePlayerDialog.NONE }) {
-                    Text("닫기")
-                }
-            }
-        )
-    }
-
-    // 회차 바로 이동 다이얼로그
-    if (activeDialog == ActivePlayerDialog.EPISODES) {
-        AlertDialog(
-            onDismissRequest = { activeDialog = ActivePlayerDialog.NONE },
-            title = { Text("회차 선택 (${allEpisodes.size}화)") },
-            text = {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    items(allEpisodes, key = { it.id }) { ep ->
-                        val isCurrent = ep.id == request.item.id
-                        val prefix = buildString {
-                            ep.seasonNumber?.let { append("S${it}") }
-                            ep.episodeNumber?.let { append("E${it}") }
-                        }.takeIf { it.isNotBlank() }?.let { "$it · " }.orEmpty()
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable(enabled = !isCurrent && !isSwitchingEpisode) {
-                                    activeDialog = ActivePlayerDialog.NONE
-                                    onSelectEpisode(ep)
-                                }
-                                .padding(vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(selected = isCurrent, onClick = null)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "$prefix${ep.name}",
-                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
-                                color = if (isCurrent) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurface
-                                },
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { activeDialog = ActivePlayerDialog.NONE }) {
-                    Text("닫기")
-                }
+                TextButton(onClick = { activeDialog = MpvDialogType.NONE }) { Text("닫기") }
             }
         )
     }
 }
 
 @Composable
-private fun PlayerQuickChip(
+private fun MpvQuickActionChip(
     icon: ImageVector,
     label: String,
     onClick: () -> Unit
@@ -1209,7 +1078,7 @@ private fun PlayerQuickChip(
     }
 }
 
-private fun formatPlayerTime(secondsDouble: Double): String {
+private fun formatMpvTime(secondsDouble: Double): String {
     val totalSec = secondsDouble.toLong().coerceAtLeast(0L)
     val hours = totalSec / 3600
     val minutes = (totalSec % 3600) / 60

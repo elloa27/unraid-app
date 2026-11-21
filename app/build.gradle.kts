@@ -120,6 +120,6 @@ dependencies {
     // 2단계: gomobile로 빌드된 내장 Tailscale(tsnet) 안드로이드 브리지 라이브러리
     implementation(files("libs/tsnetbridge.aar"))
 
-    // 3단계: Emby 전용 네이티브 플레이어(libmpv)
+    // 내장 네이티브 비디오 플레이어(libmpv)
     implementation(libs.libmpv)
 }

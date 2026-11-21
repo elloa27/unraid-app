@@ -102,8 +102,8 @@ import coil.request.ImageRequest
 import com.unraid.app.data.model.DockerContainerItem
 import com.unraid.app.data.model.DockerServiceBookmark
 import com.unraid.app.data.model.WebServiceSource
+import com.unraid.app.plugin.InstalledPlugin
 import com.unraid.app.plugin.LauncherService
-import com.unraid.app.plugin.ServicePluginRegistry
 import com.unraid.app.ui.theme.StatusGreen
 import com.unraid.app.ui.theme.StatusRed
 import kotlin.math.abs
@@ -133,9 +133,10 @@ private val FallbackIconPalette = listOf(
 fun FullScreenDockerWebView(
     activeService: LauncherService,
     quickSwitchServices: List<LauncherService>,
+    installedPlugins: List<InstalledPlugin>,
     webViewPoolManager: WebViewPoolManager,
     onSelectService: (LauncherService) -> Unit,
-    onOpenNativePlugin: ((LauncherService) -> Unit)? = null,
+    onOpenPlugin: ((LauncherService) -> Unit)? = null,
     onNavigateToDashboard: () -> Unit,
     onNavigateToLauncher: () -> Unit,
     onNavigateToSettings: () -> Unit,
@@ -144,8 +145,8 @@ fun FullScreenDockerWebView(
     val metaMap by webViewPoolManager.metaByServiceId.collectAsStateWithLifecycle()
     val cachedIds by webViewPoolManager.cachedServiceIds.collectAsStateWithLifecycle()
     val activeMeta = metaMap[activeService.id] ?: WebViewUiMeta()
-    val matchingPlugin = remember(activeService) {
-        ServicePluginRegistry.findMatchingPlugin(activeService)
+    val matchingPlugin = remember(activeService, installedPlugins) {
+        installedPlugins.firstOrNull { it.matches(activeService) }
     }
 
     var showQuickMenu by remember { mutableStateOf(false) }
@@ -262,8 +263,9 @@ fun FullScreenDockerWebView(
             QuickSwitcherSheetContent(
                 activeService = activeService,
                 canGoBack = activeMeta.canGoBack,
-                matchingPluginName = matchingPlugin?.displayName,
+                matchingPluginName = matchingPlugin?.name,
                 allServices = quickSwitchServices,
+                installedPlugins = installedPlugins,
                 cachedIds = cachedIds,
                 onBackClick = {
                     showQuickMenu = false
@@ -277,10 +279,10 @@ fun FullScreenDockerWebView(
                     showQuickMenu = false
                     webViewPoolManager.reload(activeService.id)
                 },
-                onOpenNativePlugin = if (matchingPlugin != null && onOpenNativePlugin != null) {
+                onOpenPlugin = if (matchingPlugin != null && onOpenPlugin != null) {
                     {
                         showQuickMenu = false
-                        onOpenNativePlugin(activeService)
+                        onOpenPlugin(activeService)
                     }
                 } else {
                     null
@@ -312,11 +314,12 @@ private fun QuickSwitcherSheetContent(
     canGoBack: Boolean,
     matchingPluginName: String?,
     allServices: List<LauncherService>,
+    installedPlugins: List<InstalledPlugin>,
     cachedIds: Set<String>,
     onBackClick: () -> Unit,
     onHomeClick: () -> Unit,
     onReloadClick: () -> Unit,
-    onOpenNativePlugin: (() -> Unit)?,
+    onOpenPlugin: (() -> Unit)?,
     onNavigateToDashboard: () -> Unit,
     onNavigateToLauncher: () -> Unit,
     onNavigateToSettings: () -> Unit,
@@ -386,9 +389,9 @@ private fun QuickSwitcherSheetContent(
             }
         }
 
-        if (matchingPluginName != null && onOpenNativePlugin != null) {
+        if (matchingPluginName != null && onOpenPlugin != null) {
             FilledTonalButton(
-                onClick = onOpenNativePlugin,
+                onClick = onOpenPlugin,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Icon(
@@ -397,7 +400,7 @@ private fun QuickSwitcherSheetContent(
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
-                Text("$matchingPluginName 로 전환")
+                Text("플러그인으로 전환 ($matchingPluginName)")
             }
         }
 
@@ -442,7 +445,9 @@ private fun QuickSwitcherSheetContent(
             items(allServices, key = { it.id }) { service ->
                 val isCurrent = service.id == activeService.id
                 val isCached = service.id in cachedIds
-                val plugin = remember(service) { ServicePluginRegistry.findMatchingPlugin(service) }
+                val plugin = remember(service, installedPlugins) {
+                    installedPlugins.firstOrNull { it.matches(service) }
+                }
                 Surface(
                     onClick = { onSelectService(service) },
                     shape = RoundedCornerShape(12.dp),
@@ -494,7 +499,7 @@ private fun QuickSwitcherSheetContent(
                                 }
                                 if (plugin != null) {
                                     ServiceTagBadge(
-                                        text = plugin.badgeLabel,
+                                        text = "Plugin",
                                         color = MaterialTheme.colorScheme.primary
                                     )
                                 }
@@ -561,11 +566,12 @@ fun DockerWebLauncherScreen(
     allDetectedContainers: List<DockerContainerItem>,
     pinnedAutoDockerIds: Set<String>,
     manualBookmarks: List<DockerServiceBookmark>,
+    installedPlugins: List<InstalledPlugin>,
     webViewPoolManager: WebViewPoolManager,
     isRefreshingDashboard: Boolean,
     onLaunchDefault: (LauncherService) -> Unit,
     onLaunchWebView: (LauncherService) -> Unit,
-    onLaunchNativePlugin: (LauncherService) -> Unit,
+    onLaunchPlugin: (LauncherService) -> Unit,
     onToggleAutoDockerPinned: (serviceId: String, pinned: Boolean) -> Unit,
     onEditService: (service: LauncherService, newName: String, newUrl: String) -> Unit,
     onTogglePreferNativeUi: (service: LauncherService, preferNative: Boolean) -> Unit,
@@ -699,12 +705,12 @@ fun DockerWebLauncherScreen(
                     verticalArrangement = Arrangement.spacedBy(18.dp)
                 ) {
                     gridItems(launcherServices, key = { it.id }) { service ->
-                        val matchingPlugin = remember(service) {
-                            ServicePluginRegistry.findMatchingPlugin(service)
+                        val matchingPlugin = remember(service, installedPlugins) {
+                            installedPlugins.firstOrNull { it.matches(service) }
                         }
                         LauncherAppIconTile(
                             service = service,
-                            nativeBadgeLabel = matchingPlugin?.badgeLabel,
+                            nativeBadgeLabel = if (matchingPlugin != null) "Plugin" else null,
                             onClick = { onLaunchDefault(service) },
                             onLongClick = { longPressedService = service }
                         )
@@ -716,8 +722,8 @@ fun DockerWebLauncherScreen(
 
     // 아이콘 길게 누르기 빠른 액션 시트
     longPressedService?.let { target ->
-        val matchingPlugin = remember(target) {
-            ServicePluginRegistry.findMatchingPlugin(target)
+        val matchingPlugin = remember(target, installedPlugins) {
+            installedPlugins.firstOrNull { it.matches(target) }
         }
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(
@@ -741,7 +747,7 @@ fun DockerWebLauncherScreen(
                         name = target.name,
                         iconUrl = target.iconUrl,
                         isRunning = target.isRunning,
-                        nativeBadgeLabel = matchingPlugin?.badgeLabel,
+                        nativeBadgeLabel = if (matchingPlugin != null) "Plugin" else null,
                         size = 44.dp,
                         showStatusDot = true
                     )
@@ -765,9 +771,21 @@ fun DockerWebLauncherScreen(
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
 
+                if (matchingPlugin != null) {
+                    ActionSheetRow(
+                        icon = Icons.Filled.AutoAwesome,
+                        label = "플러그인으로 열기 (${matchingPlugin.name})",
+                        tint = MaterialTheme.colorScheme.primary,
+                        onClick = {
+                            longPressedService = null
+                            onLaunchPlugin(target)
+                        }
+                    )
+                }
+
                 ActionSheetRow(
                     icon = Icons.AutoMirrored.Filled.OpenInNew,
-                    label = "웹뷰로 열기 (전체 화면 PWA)",
+                    label = "일반 웹뷰로 열기",
                     onClick = {
                         longPressedService = null
                         onLaunchWebView(target)
@@ -775,16 +793,6 @@ fun DockerWebLauncherScreen(
                 )
 
                 if (matchingPlugin != null) {
-                    ActionSheetRow(
-                        icon = Icons.Filled.AutoAwesome,
-                        label = "${matchingPlugin.displayName}로 열기",
-                        tint = MaterialTheme.colorScheme.primary,
-                        onClick = {
-                            longPressedService = null
-                            onLaunchNativePlugin(target)
-                        }
-                    )
-
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -800,15 +808,15 @@ fun DockerWebLauncherScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "탭 시 전용 네이티브 UI 우선 사용",
+                                text = "탭 시 외부 플러그인 우선 사용",
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
                                 text = if (target.preferNativeUi) {
-                                    "현재: 전용 UI로 바로 열림"
+                                    "현재: 설치된 플러그인으로 바로 열림"
                                 } else {
-                                    "현재: 웹뷰로 바로 열림"
+                                    "현재: 일반 웹뷰로 바로 열림"
                                 },
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
