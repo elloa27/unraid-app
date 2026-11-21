@@ -31,7 +31,6 @@ static int ts_copy_ipv6(struct sockaddr *sa, unsigned char *dst) {
 import "C"
 
 import (
-	"fmt"
 	"net"
 	"unsafe"
 
@@ -39,16 +38,29 @@ import (
 )
 
 // Android 11(API 30) 이상에서 일반 앱의 netlink 소켓 제한(netlinkrib: permission denied)을
-// 회피하기 위해 Android bionic 표준 getifaddrs(3) 기반 인터페이스 조회 함수를 등록합니다.
-// (go:linkname 의존성이 없어 최신 Go 툴체인에서도 안전하게 링크됩니다.)
+// 회피하기 위해 Android bionic 표준 getifaddrs(3) + UDP 로컬 IP 프로브 폴백을 등록합니다.
 func init() {
 	netmon.RegisterInterfaceGetter(androidGetInterfaces)
 }
 
 func androidGetInterfaces() ([]netmon.Interface, error) {
+	ifaces, err := getInterfacesViaBionic()
+	if err == nil && hasNonLoopbackAddr(ifaces) {
+		return ifaces, nil
+	}
+
+	// 일부 엄격한 Android SELinux 환경에서 getifaddrs가 제한된 경우
+	// 커널 라우팅 테이블에 패킷 전송 없이 UDP 소켓 바인딩으로 활성 로컬 IP를 안전하게 조회
+	return buildSyntheticFallbackInterfaces(), nil
+}
+
+func getInterfacesViaBionic() ([]netmon.Interface, error) {
 	var ifap *C.struct_ifaddrs
 	if rc := C.getifaddrs(&ifap); rc != 0 {
-		return nil, fmt.Errorf("android getifaddrs 실패: rc=%d", int(rc))
+		return nil, net.InvalidAddrError("getifaddrs failed")
+	}
+	if ifap == nil {
+		return nil, nil
 	}
 	defer C.freeifaddrs(ifap)
 
@@ -68,6 +80,9 @@ func androidGetInterfaces() ([]netmon.Interface, error) {
 		entry, exists := byName[name]
 		if !exists {
 			idx := int(C.if_nametoindex(cur.ifa_name))
+			if idx <= 0 {
+				idx = len(entries) + 1
+			}
 			entry = &ifaceEntry{
 				iface: net.Interface{
 					Index: idx,
@@ -125,6 +140,63 @@ func androidGetInterfaces() ([]netmon.Interface, error) {
 		})
 	}
 	return result, nil
+}
+
+func hasNonLoopbackAddr(ifaces []netmon.Interface) bool {
+	for _, iface := range ifaces {
+		if iface.Interface == nil || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		if len(iface.AltAddrs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func buildSyntheticFallbackInterfaces() []netmon.Interface {
+	loIface := net.Interface{
+		Index: 1,
+		MTU:   65536,
+		Name:  "lo",
+		Flags: net.FlagUp | net.FlagLoopback | net.FlagRunning,
+	}
+	result := []netmon.Interface{
+		{
+			Interface: &loIface,
+			AltAddrs: []net.Addr{
+				&net.IPNet{IP: net.IPv4(127, 0, 0, 1), Mask: net.CIDRMask(8, 32)},
+			},
+		},
+	}
+
+	// 패킷을 전송하지 않고 활성 아웃바운드 로컬 IP 확인
+	var activeAddrs []net.Addr
+	if conn, err := net.Dial("udp4", "1.1.1.1:53"); err == nil {
+		if udpAddr, ok := conn.LocalAddr().(*net.UDPAddr); ok && udpAddr.IP != nil {
+			if ip4 := udpAddr.IP.To4(); ip4 != nil {
+				activeAddrs = append(activeAddrs, &net.IPNet{
+					IP:   ip4,
+					Mask: net.CIDRMask(24, 32),
+				})
+			}
+		}
+		_ = conn.Close()
+	}
+
+	if len(activeAddrs) > 0 {
+		netIface := net.Interface{
+			Index: 2,
+			MTU:   1500,
+			Name:  "android0",
+			Flags: net.FlagUp | net.FlagBroadcast | net.FlagMulticast | net.FlagRunning,
+		}
+		result = append(result, netmon.Interface{
+			Interface: &netIface,
+			AltAddrs:  activeAddrs,
+		})
+	}
+	return result
 }
 
 func convertAndroidFlags(raw uint) net.Flags {

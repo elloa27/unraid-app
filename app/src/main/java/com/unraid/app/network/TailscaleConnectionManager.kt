@@ -85,6 +85,9 @@ class TailscaleConnectionManager(
     private var activeProxyPort: Int = 0
 
     @Volatile
+    private var tsnetStartedAtLeastOnce: Boolean = false
+
+    @Volatile
     private var loggedMissingLocationOnce: Boolean = false
 
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
@@ -412,7 +415,8 @@ class TailscaleConnectionManager(
         hasLocPerm: Boolean,
         forceRestart: Boolean
     ) {
-        val alreadyRunning = runCatching { Tsnetbridge.isRunning() }.getOrDefault(false)
+        val alreadyRunning = tsnetStartedAtLeastOnce &&
+            runCatching { Tsnetbridge.isRunning() }.getOrDefault(false)
         if (!forceRestart && alreadyRunning && activeProxyPort > 0) {
             NetworkProxyManager.enableLocalProxy(
                 port = activeProxyPort,
@@ -449,6 +453,7 @@ class TailscaleConnectionManager(
             if (!stateDir.exists()) {
                 stateDir.mkdirs()
             }
+            tsnetStartedAtLeastOnce = true
             val portLong = Tsnetbridge.start(
                 stateDir.absolutePath,
                 DEFAULT_TSNET_HOSTNAME,
@@ -482,10 +487,12 @@ class TailscaleConnectionManager(
             activeProxyPort = 0
             NetworkProxyManager.disableLocalProxy()
             val errorText = t.localizedMessage ?: t.javaClass.simpleName
+            val goLogs = runCatching { Tsnetbridge.getRecentLogs() }.getOrNull()
             AppErrorLogger.logError(
                 tag = "TailscaleTsnet",
                 message = "내장 Tailscale(tsnet) 시작에 실패했습니다: $errorText",
-                throwable = t
+                throwable = t,
+                extraDetails = goLogs?.takeIf { it.isNotBlank() }?.let { "tsnet 내부 로그:\n$it" }
             )
             _status.value = ConnectionStatus(
                 phase = RoutePhase.TAILSCALE_ERROR,
@@ -502,16 +509,18 @@ class TailscaleConnectionManager(
     }
 
     private fun stopTsnetLocked() {
-        runCatching {
-            if (Tsnetbridge.isRunning() || activeProxyPort > 0) {
-                Tsnetbridge.stop()
+        if (tsnetStartedAtLeastOnce || activeProxyPort > 0) {
+            runCatching {
+                if (Tsnetbridge.isRunning() || activeProxyPort > 0) {
+                    Tsnetbridge.stop()
+                }
+            }.onFailure { e ->
+                AppErrorLogger.logError(
+                    tag = "TailscaleTsnet",
+                    message = "내장 Tailscale(tsnet) 중지 중 오류가 발생했습니다.",
+                    throwable = e
+                )
             }
-        }.onFailure { e ->
-            AppErrorLogger.logError(
-                tag = "TailscaleTsnet",
-                message = "내장 Tailscale(tsnet) 중지 중 오류가 발생했습니다.",
-                throwable = e
-            )
         }
         activeProxyPort = 0
         NetworkProxyManager.disableLocalProxy()

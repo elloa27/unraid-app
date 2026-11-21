@@ -8,12 +8,16 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 
 	"tailscale.com/tsnet"
 )
+
+const maxRecentLogLines = 60
 
 var (
 	mu           sync.Mutex
@@ -24,13 +28,43 @@ var (
 	running      bool
 	tailscaleIP  string
 	statusDetail = "중지됨"
+
+	logMu      sync.Mutex
+	recentLogs []string
 )
+
+func appendLog(prefix string, format string, args ...any) {
+	line := fmt.Sprintf("%s [%s] %s", time.Now().Format("15:04:05"), prefix, fmt.Sprintf(format, args...))
+	logMu.Lock()
+	recentLogs = append(recentLogs, line)
+	if len(recentLogs) > maxRecentLogLines {
+		recentLogs = recentLogs[len(recentLogs)-maxRecentLogLines:]
+	}
+	logMu.Unlock()
+}
+
+// GetRecentLogs 는 앱 자체 에러 로그 화면에서 원인을 확인할 수 있도록 최근 tsnet 내부 로그를 반환합니다.
+func GetRecentLogs() string {
+	logMu.Lock()
+	defer logMu.Unlock()
+	return strings.Join(recentLogs, "\n")
+}
 
 // Start 는 앱 내부 저장소(stateDir)에 Tailscale 상태를 보관하며 tsnet 노드를 시작하고,
 // 로컬 HTTP/HTTPS(CONNECT) 프록시 서버를 127.0.0.1:<자동할당포트> 에 열어 포트 번호를 반환합니다.
-func Start(stateDir string, hostname string, authKey string) (int, error) {
+func Start(stateDir string, hostname string, authKey string) (port int, retErr error) {
+	// Go 내부 panic이 Android 앱 전체 강제 종료(SIGABRT)로 이어지지 않도록 최상위 복구 가드
+	defer func() {
+		if r := recover(); r != nil {
+			stack := string(debug.Stack())
+			appendLog("PANIC", "Start 중 복구된 패닉: %v\n%s", r, stack)
+			setStatus(fmt.Sprintf("내부 오류(panic): %v", r))
+			port = 0
+			retErr = fmt.Errorf("tsnet 내부 패닉 발생: %v", r)
+		}
+	}()
+
 	mu.Lock()
-	// 이미 실행 중인 인스턴스가 있으면 먼저 안전하게 정리
 	stopLocked()
 	statusDetail = "Tailscale 노드 초기화 중..."
 	mu.Unlock()
@@ -45,15 +79,32 @@ func Start(stateDir string, hostname string, authKey string) (int, error) {
 		return 0, fmt.Errorf("상태 폴더 생성 실패: %w", err)
 	}
 
+	// Android 앱 샌드박스에는 HOME/XDG/TMPDIR 환경 변수가 비어 있어
+	// Go 표준 라이브러리 및 Tailscale 내부 경로 조회 시 오류가 발생하지 않도록 쓰기 가능한 내부 경로 주입
+	tmpDir := filepath.Join(trimmedDir, "tmp")
+	_ = os.MkdirAll(tmpDir, 0o700)
+	_ = os.Setenv("HOME", trimmedDir)
+	_ = os.Setenv("XDG_CONFIG_HOME", trimmedDir)
+	_ = os.Setenv("XDG_CACHE_HOME", trimmedDir)
+	_ = os.Setenv("TMPDIR", tmpDir)
+
 	cleanHost := strings.TrimSpace(hostname)
 	if cleanHost == "" {
 		cleanHost = "unraid-hub-android"
 	}
 
+	appendLog("bridge", "tsnet.Server 시작 준비 (host=%s, dir=%s)", cleanHost, trimmedDir)
+
 	srv := &tsnet.Server{
 		Dir:      trimmedDir,
 		Hostname: cleanHost,
 		AuthKey:  strings.TrimSpace(authKey),
+		Logf: func(format string, args ...any) {
+			appendLog("tsnet", format, args...)
+		},
+		UserLogf: func(format string, args ...any) {
+			appendLog("tsnet-user", format, args...)
+		},
 	}
 
 	// Tailscale 컨트롤 서버 연결 및 IP 할당 대기 (최대 45초)
@@ -63,6 +114,7 @@ func Start(stateDir string, hostname string, authKey string) (int, error) {
 	status, err := srv.Up(upCtx)
 	if err != nil {
 		_ = srv.Close()
+		appendLog("bridge", "srv.Up 실패: %v", err)
 		setStatus(fmt.Sprintf("Tailscale 연결 실패: %v", err))
 		return 0, fmt.Errorf("Tailscale 연결 실패: %w", err)
 	}
@@ -71,6 +123,7 @@ func Start(stateDir string, hostname string, authKey string) (int, error) {
 	if status != nil && len(status.TailscaleIPs) > 0 {
 		assignedIP = status.TailscaleIPs[0].String()
 	}
+	appendLog("bridge", "Tailscale 연결 완료 (IP=%s)", assignedIP)
 
 	// 사용 가능한 임의의 로컬 포트(127.0.0.1:0) 바인딩
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -119,7 +172,13 @@ func Start(stateDir string, hostname string, authKey string) (int, error) {
 	mu.Unlock()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				appendLog("PANIC", "프록시 서빙 중 패닉 복구: %v", r)
+			}
+		}()
 		if serveErr := httpSrv.Serve(ln); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			appendLog("proxy", "로컬 프록시 중단: %v", serveErr)
 			mu.Lock()
 			if proxyServer == httpSrv {
 				running = false
@@ -134,6 +193,11 @@ func Start(stateDir string, hostname string, authKey string) (int, error) {
 
 // Stop 은 로컬 프록시 서버와 내장 tsnet 노드를 안전하게 종료합니다.
 func Stop() {
+	defer func() {
+		if r := recover(); r != nil {
+			appendLog("PANIC", "Stop 중 패닉 복구: %v", r)
+		}
+	}()
 	mu.Lock()
 	defer mu.Unlock()
 	stopLocked()
@@ -187,6 +251,12 @@ func setStatus(msg string) {
 // tsnet.Server.Dial 을 통해 Tailscale 네트워크로 중계하는 프록시 핸들러를 생성합니다.
 func newTsnetProxyHandler(srv *tsnet.Server, transport *http.Transport) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				appendLog("PANIC", "프록시 요청 처리 중 패닉 복구: %v", rec)
+			}
+		}()
+
 		if r.Method == http.MethodConnect {
 			handleConnectTunnel(w, r, srv)
 			return
@@ -236,7 +306,6 @@ func handleConnectTunnel(w http.ResponseWriter, r *http.Request, srv *tsnet.Serv
 		return
 	}
 
-	// 버퍼에 남아 있는 선행 바이트가 있으면 먼저 업스트림으로 전송
 	if clientBuf != nil && clientBuf.Reader.Buffered() > 0 {
 		buffered := make([]byte, clientBuf.Reader.Buffered())
 		if n, readErr := clientBuf.Read(buffered); readErr == nil && n > 0 {
@@ -278,7 +347,6 @@ func handleHttpUpgradeTunnel(w http.ResponseWriter, r *http.Request, srv *tsnet.
 		return
 	}
 
-	// 업스트림 서버에 원본 HTTP 업그레이드 요청 전달
 	r.RequestURI = ""
 	if err := r.Write(upstreamConn); err != nil {
 		_ = clientConn.Close()

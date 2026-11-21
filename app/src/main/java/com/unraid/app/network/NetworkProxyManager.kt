@@ -1,5 +1,7 @@
 package com.unraid.app.network
 
+import android.os.Handler
+import android.os.Looper
 import androidx.webkit.ProxyConfig
 import androidx.webkit.ProxyController
 import androidx.webkit.WebViewFeature
@@ -14,22 +16,23 @@ import java.net.ProxySelector
 import java.net.SocketAddress
 import java.net.URI
 import java.util.concurrent.Executor
-import java.util.concurrent.Executors
 
 /**
  * 앱 전체(OkHttp + Android WebView)의 프록시 라우팅을 중앙에서 일원화하여 관리하는 매니저.
- *
- * [2단계 Tailscale tsnet 연동 가이드]
- * 2단계에서 tsnet 로컬 프록시 리스너가 기동되면 아래 메서드 한 줄만 호출하면 됩니다:
- *   NetworkProxyManager.enableLocalProxy(port = tsnetPort, scheme = LocalProxyScheme.HTTP)
- * 이후 모든 OkHttp GraphQL 요청과 도커 WebView 트래픽이 자동으로 127.0.0.1:<포트> 를 경유합니다.
+ * - OkHttp: 동적 ProxySelector로 백그라운드 스레드에서도 즉시 프록시 전환
+ * - Android WebView: ProxyController 호출을 반드시 메인(UI) 스레드에서 실행하여 Chromium 크래시 방지
  */
 object NetworkProxyManager {
 
     private val _proxyConfig = MutableStateFlow(LocalProxyConfig.DISABLED)
     val proxyConfig: StateFlow<LocalProxyConfig> = _proxyConfig.asStateFlow()
 
-    private val proxyExecutor: Executor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainExecutor = Executor { runnable -> mainHandler.post(runnable) }
+
+    @Volatile
+    private var webViewProxyApplied: Boolean = false
+
     private var onProxyChangedListener: (() -> Unit)? = null
 
     /**
@@ -102,43 +105,50 @@ object NetworkProxyManager {
     fun applyProxy(config: LocalProxyConfig) {
         _proxyConfig.value = config
         onProxyChangedListener?.invoke()
-        applyToWebView(config)
+        applyToWebViewOnMainThread(config)
     }
 
-    private fun applyToWebView(config: LocalProxyConfig) {
-        if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
-            if (config.isActive) {
-                AppErrorLogger.logError(
-                    tag = "WebViewProxy",
-                    message = "현재 기기의 WebView가 PROXY_OVERRIDE 기능을 지원하지 않습니다."
-                )
-            }
+    private fun applyToWebViewOnMainThread(config: LocalProxyConfig) {
+        // 프록시가 한 번도 적용된 적 없는 초기 상태에서 불필요한 WebView 엔진 초기화를 방지
+        if (!config.isActive && !webViewProxyApplied) {
             return
         }
 
-        runCatching {
-            val controller = ProxyController.getInstance()
-            if (config.isActive) {
-                val webViewProxyConfig = ProxyConfig.Builder()
-                    .addProxyRule(config.toWebViewProxyRule())
-                    .addBypassRule("127.0.0.1")
-                    .addBypassRule("localhost")
-                    .build()
+        mainHandler.post {
+            try {
+                if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+                    if (config.isActive) {
+                        AppErrorLogger.logError(
+                            tag = "WebViewProxy",
+                            message = "현재 기기의 WebView가 PROXY_OVERRIDE 기능을 지원하지 않습니다."
+                        )
+                    }
+                    return@post
+                }
 
-                controller.setProxyOverride(webViewProxyConfig, proxyExecutor) {
-                    // WebView 전역 프록시 적용 완료
+                val controller = ProxyController.getInstance()
+                if (config.isActive) {
+                    val webViewProxyConfig = ProxyConfig.Builder()
+                        .addProxyRule(config.toWebViewProxyRule())
+                        .addBypassRule("127.0.0.1")
+                        .addBypassRule("localhost")
+                        .build()
+
+                    controller.setProxyOverride(webViewProxyConfig, mainExecutor) {
+                        webViewProxyApplied = true
+                    }
+                } else {
+                    controller.clearProxyOverride(mainExecutor) {
+                        webViewProxyApplied = false
+                    }
                 }
-            } else {
-                controller.clearProxyOverride(proxyExecutor) {
-                    // WebView 전역 프록시 해제 완료
-                }
+            } catch (t: Throwable) {
+                AppErrorLogger.logError(
+                    tag = "WebViewProxy",
+                    message = "WebView 프록시 설정 반영 중 오류가 발생했습니다: ${t.localizedMessage ?: t.javaClass.simpleName}",
+                    throwable = t
+                )
             }
-        }.onFailure { e ->
-            AppErrorLogger.logError(
-                tag = "WebViewProxy",
-                message = "WebView 프록시 설정 반영 중 오류가 발생했습니다.",
-                throwable = e
-            )
         }
     }
 }

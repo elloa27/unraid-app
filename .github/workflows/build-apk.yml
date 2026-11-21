@@ -71,6 +71,8 @@ jobs:
         shell: bash
         env:
           GOTOOLCHAIN: auto
+          # Android 15+ 16KB 메모리 페이지 기기 호환용 ELF 정렬 플래그
+          CGO_LDFLAGS: "-Wl,-z,max-page-size=16384"
         run: |
           mkdir -p app/libs
           cd tsnet-bridge
