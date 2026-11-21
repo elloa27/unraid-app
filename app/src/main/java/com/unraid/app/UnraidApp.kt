@@ -1,6 +1,9 @@
 package com.unraid.app
 
 import android.app.Application
+import coil.ImageLoader
+import coil.ImageLoaderFactory
+import coil.decode.SvgDecoder
 import com.unraid.app.data.local.AppErrorLogger
 import com.unraid.app.data.local.AppPreferencesRepository
 import com.unraid.app.data.local.SecureCredentialStore
@@ -12,11 +15,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import okhttp3.Call
 
 /**
- * 앱 전역 싱글톤 의존성, 에러 로거, 내장 Tailscale(tsnet) 자동 전환 엔진을 초기화하는 Application 클래스.
+ * 앱 전역 싱글톤 의존성, 에러 로거, 내장 Tailscale(tsnet) 자동 전환 엔진,
+ * 그리고 Tailscale 프록시/사설 SSL 설정이 자동 반영되는 Coil ImageLoader를 초기화합니다.
  */
-class UnraidApp : Application() {
+class UnraidApp : Application(), ImageLoaderFactory {
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -55,5 +60,19 @@ class UnraidApp : Application() {
 
         // 홈 Wi-Fi 감지 및 내장 Tailscale(tsnet) 자동 전환 엔진 시작
         tailscaleConnectionManager.startMonitoring()
+    }
+
+    /**
+     * 모든 Coil 아이콘/이미지 요청이 현재 활성화된 OkHttpClient(Tailscale 프록시 + 자체 서명 SSL 허용)를
+     * 실시간으로 경유하도록 전역 ImageLoader를 구성합니다. (SVG 도커 아이콘도 함께 지원)
+     */
+    override fun newImageLoader(): ImageLoader {
+        return ImageLoader.Builder(this)
+            .callFactory(Call.Factory { request -> NetworkModule.okHttpClient.newCall(request) })
+            .components {
+                add(SvgDecoder.Factory())
+            }
+            .crossfade(true)
+            .build()
     }
 }

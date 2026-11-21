@@ -6,7 +6,9 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.unraid.app.data.model.AutoDockerOverride
 import com.unraid.app.data.model.ConnectionMode
 import com.unraid.app.data.model.DockerServiceBookmark
 import kotlinx.coroutines.flow.Flow
@@ -82,7 +84,65 @@ class AppPreferencesRepository(private val context: Context) {
         prefs[KEY_TAILSCALE_SERVER_URL].orEmpty()
     }
 
+    /**
+     * 사용자가 런처 홈 화면에 표시하도록 선택한 Unraid 자동 감지 도커 ID 목록
+     */
+    val pinnedAutoDockerIdsFlow: Flow<Set<String>> = context.appDataStore.data.map { prefs ->
+        prefs[KEY_PINNED_AUTO_DOCKER_IDS] ?: emptySet()
+    }
+
+    /**
+     * 자동 감지 도커 항목의 커스텀 이름/URL/네이티브 UI 선호 설정 맵
+     */
+    val autoDockerOverridesFlow: Flow<Map<String, AutoDockerOverride>> = context.appDataStore.data.map { prefs ->
+        val raw = prefs[KEY_AUTO_DOCKER_OVERRIDES_JSON].orEmpty()
+        if (raw.isBlank()) {
+            emptyMap()
+        } else {
+            runCatching {
+                json.decodeFromString<Map<String, AutoDockerOverride>>(raw)
+            }.onFailure { e ->
+                AppErrorLogger.logError(
+                    tag = "Preferences",
+                    message = "자동 감지 도커 커스텀 설정 JSON 파싱에 실패했습니다.",
+                    throwable = e
+                )
+            }.getOrDefault(emptyMap())
+        }
+    }
+
     suspend fun getUnraidServerUrl(): String = unraidServerUrlFlow.first()
+
+    suspend fun setAutoDockerPinned(serviceId: String, pinned: Boolean) {
+        context.appDataStore.edit { prefs ->
+            val current = prefs[KEY_PINNED_AUTO_DOCKER_IDS] ?: emptySet()
+            prefs[KEY_PINNED_AUTO_DOCKER_IDS] = if (pinned) {
+                current + serviceId
+            } else {
+                current - serviceId
+            }
+        }
+    }
+
+    suspend fun saveAutoDockerOverride(serviceId: String, override: AutoDockerOverride) {
+        val current = autoDockerOverridesFlow.first()
+        val normalized = override.copy(
+            customName = override.customName?.trim()?.takeIf { it.isNotBlank() },
+            customUrl = override.customUrl?.trim()?.takeIf { it.isNotBlank() }?.let { normalizeUrl(it) }
+        )
+        context.appDataStore.edit { prefs ->
+            prefs[KEY_AUTO_DOCKER_OVERRIDES_JSON] = json.encodeToString(current + (serviceId to normalized))
+        }
+    }
+
+    suspend fun updateManualServicePreferNativeUi(serviceId: String, preferNativeUi: Boolean) {
+        val current = dockerServicesFlow.first()
+        saveDockerServices(
+            current.map { item ->
+                if (item.id == serviceId) item.copy(preferNativeUi = preferNativeUi) else item
+            }
+        )
+    }
 
     suspend fun setAllowSelfSignedSsl(enabled: Boolean) {
         context.appDataStore.edit { prefs ->
@@ -173,6 +233,8 @@ class AppPreferencesRepository(private val context: Context) {
         private val KEY_CONNECTION_MODE = stringPreferencesKey("connection_mode")
         private val KEY_HOME_WIFI_SSID = stringPreferencesKey("home_wifi_ssid")
         private val KEY_TAILSCALE_SERVER_URL = stringPreferencesKey("tailscale_server_url")
+        private val KEY_PINNED_AUTO_DOCKER_IDS = stringSetPreferencesKey("pinned_auto_docker_ids")
+        private val KEY_AUTO_DOCKER_OVERRIDES_JSON = stringPreferencesKey("auto_docker_overrides_json")
 
         /**
          * 입력된 서버 URL에 스킴이 없으면 http:// 를 보정하고 끝의 불필요한 슬래시를 정리합니다.

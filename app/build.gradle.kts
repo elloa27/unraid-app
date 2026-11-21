@@ -102,13 +102,15 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.extended)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
-    // 네트워크, WebView, 로컬 저장소, 암호화 저장소, 직렬화
+    // 네트워크, WebView, 로컬 저장소, 암호화 저장소, 직렬화, 이미지 로딩(Coil)
     implementation(libs.okhttp)
     implementation(libs.androidx.webkit)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.security.crypto)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.coil.compose)
+    implementation(libs.coil.svg)
 
     // 2단계: gomobile로 빌드된 내장 Tailscale(tsnet) 안드로이드 브리지 라이브러리
     implementation(files("libs/tsnetbridge.aar"))

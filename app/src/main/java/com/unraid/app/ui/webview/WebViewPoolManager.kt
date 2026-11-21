@@ -14,8 +14,8 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.unraid.app.data.local.AppErrorLogger
-import com.unraid.app.data.model.WebServiceItem
 import com.unraid.app.network.NetworkModule
+import com.unraid.app.plugin.LauncherService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -52,7 +52,7 @@ class WebViewPoolManager {
     @SuppressLint("SetJavaScriptEnabled")
     fun getOrCreate(
         context: Context,
-        service: WebServiceItem
+        service: LauncherService
     ): WebView {
         val existing = pool[service.id]
         if (existing != null) {
@@ -189,7 +189,7 @@ class WebViewPoolManager {
         pool[serviceId]?.webView?.reload()
     }
 
-    fun goHome(service: WebServiceItem) {
+    fun goHome(service: LauncherService) {
         pool[service.id]?.webView?.loadUrl(service.url)
     }
 

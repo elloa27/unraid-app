@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
@@ -86,6 +87,7 @@ import com.unraid.app.data.model.ConnectionMode
 import com.unraid.app.data.model.DockerServiceBookmark
 import com.unraid.app.data.model.ErrorLogEntry
 import com.unraid.app.data.model.RoutePhase
+import com.unraid.app.plugin.ServicePluginRegistry
 import com.unraid.app.ui.theme.StatusAmber
 import com.unraid.app.ui.theme.StatusBlue
 import com.unraid.app.ui.theme.StatusGreen
@@ -684,7 +686,98 @@ fun SettingsScreen(
                 }
             }
 
-            // 4. 자체 에러 로그 및 디버깅 카드
+            // 4. 서비스별 전용 UI 플러그인 설정 카드 (ServicePluginRegistry 자동 연동)
+            item(key = "service_plugins_card") {
+                val plugins = remember { ServicePluginRegistry.allPlugins() }
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Filled.AutoAwesome,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "플러그인별 설정 (전용 네이티브 UI)",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                            }
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text(
+                                    text = "${plugins.size}개 등록",
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        if (plugins.isEmpty()) {
+                            Text(
+                                text = "현재 등록된 전용 UI 플러그인이 없습니다. 다음 단계에서 Emby(libmpv) 등 서비스별 플러그인을 등록하면 이 영역에 전용 설정이 자동으로 표시됩니다.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            plugins.forEachIndexed { index, plugin ->
+                                if (index > 0) {
+                                    HorizontalDivider(
+                                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+                                    )
+                                }
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = plugin.displayName,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                                            shape = RoundedCornerShape(6.dp)
+                                        ) {
+                                            Text(
+                                                text = plugin.badgeLabel,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        text = plugin.description,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    if (plugin.hasSettings) {
+                                        plugin.SettingsContent()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 5. 자체 에러 로그 및 디버깅 카드
             item(key = "error_log_card") {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),

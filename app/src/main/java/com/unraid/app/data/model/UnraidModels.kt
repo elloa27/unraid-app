@@ -61,22 +61,12 @@ data class DockerContainerItem(
 }
 
 /**
- * 도커 웹뷰 런처 및 전체 화면 웹뷰에서 공통으로 사용하는 통합 웹 서비스 모델
- * (Unraid 자동 감지 항목 + 설정 화면 수동 등록/커스텀 항목 통합)
+ * 도커 웹뷰 런처 서비스 출처 구분 (Unraid 자동 감지 / 수동 등록)
  */
 enum class WebServiceSource(val labelKo: String) {
     AUTO_DOCKER("자동 감지"),
     MANUAL("수동 등록")
 }
-
-data class WebServiceItem(
-    val id: String,
-    val name: String,
-    val url: String,
-    val source: WebServiceSource,
-    val isRunning: Boolean = true,
-    val iconUrl: String? = null
-)
 
 /**
  * 도커 컨테이너 제어 명령 종류
