@@ -248,6 +248,8 @@ fun MpvPlayerScreen(
         var createdMpv: MPVLib? = null
 
         val observer = object : MPVLib.EventObserver {
+            override fun eventProperty(property: String) = Unit
+
             override fun eventProperty(property: String, value: Long) {
                 if (property == "track-list/count") {
                     mainHandler.post { refreshTracks(createdMpv) }
@@ -262,6 +264,8 @@ fun MpvPlayerScreen(
                     }
                 }
             }
+
+            override fun eventProperty(property: String, value: String) = Unit
 
             override fun eventProperty(property: String, value: Double) {
                 mainHandler.post {
@@ -307,30 +311,23 @@ fun MpvPlayerScreen(
                     }
                 }
             }
-
-            override fun eventEndFile(reason: Int, error: Int) {
-                mainHandler.post {
-                    isBuffering = false
-                    if (reason == MPVLib.MpvEndFileReason.MPV_END_FILE_REASON_ERROR) {
-                        val msg = "스트림 재생 실패 (mpv 오류 코드: $error)"
-                        initError = msg
-                        AppErrorLogger.logError(
-                            tag = "EmbyMpv",
-                            message = msg,
-                            extraDetails = "Direct Play URL: ${request.streamUrl}"
-                        )
-                    }
-                }
-            }
         }
 
         val logObserver = object : MPVLib.LogObserver {
             override fun logMessage(prefix: String, level: Int, text: String) {
                 if (level <= MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR && text.isNotBlank()) {
+                    val trimmed = text.trim()
                     AppErrorLogger.logError(
                         tag = "EmbyMpv/$prefix",
-                        message = text.trim()
+                        message = trimmed
                     )
+                    if (level <= MPVLib.MpvLogLevel.MPV_LOG_LEVEL_FATAL) {
+                        mainHandler.post {
+                            if (initError == null) {
+                                initError = "재생 오류 ($prefix): $trimmed"
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -375,7 +372,6 @@ fun MpvPlayerScreen(
             }
 
             mpv.init()
-            mpv.requestLogMessages("warn")
             mpv.addLogObserver(logObserver)
             mpv.addObserver(observer)
             mpv.observeProperty("time-pos", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
