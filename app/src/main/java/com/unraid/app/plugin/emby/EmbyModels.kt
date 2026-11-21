@@ -9,7 +9,9 @@ data class EmbyAuthConfig(
     val accessToken: String = "",
     val userId: String = "",
     val username: String = "",
-    val preferHardwareDecoding: Boolean = true
+    val preferHardwareDecoding: Boolean = true,
+    val subtitleFontName: String = "",
+    val forceSubtitleFontOnAss: Boolean = false
 ) {
     val isAuthenticated: Boolean
         get() = accessToken.isNotBlank() && userId.isNotBlank()

@@ -338,14 +338,35 @@ fun MpvPlayerScreen(
             createdMpv = mpv
 
             // 비디오/오디오/자막(libass) 기본 옵션
+            val embyConfig = credentialStore.getConfig()
+            val fontsDir = EmbyFontStorage.getFontsDir(context)
+
             mpv.setOptionString("vo", "gpu")
             mpv.setOptionString("gpu-context", "android")
             mpv.setOptionString("opengl-es", "yes")
             mpv.setOptionString("ao", "audiotrack,opensles")
             mpv.setOptionString("hwdec", if (useHardwareDecoding) "auto-safe" else "no")
             mpv.setOptionString("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
+            mpv.setOptionString("embeddedfonts", "yes")
             mpv.setOptionString("sub-ass", "yes")
-            mpv.setOptionString("sub-ass-override", "no")
+
+            // 사용자가 앱에 추가한 커스텀 폰트(.ttf/.otf/.ttc) 폴더를 libass에 등록
+            if (fontsDir.exists() && fontsDir.listFiles()?.isNotEmpty() == true) {
+                mpv.setOptionString("sub-fonts-dir", fontsDir.absolutePath)
+            }
+
+            // 사용자 지정 기본 자막 폰트 및 ASS 강제 적용 옵션 반영
+            val customFontName = embyConfig.subtitleFontName.trim()
+            if (customFontName.isNotBlank()) {
+                mpv.setOptionString("sub-font", customFontName)
+            }
+            if (embyConfig.forceSubtitleFontOnAss && customFontName.isNotBlank()) {
+                mpv.setOptionString("sub-ass-override", "yes")
+                mpv.setOptionString("sub-ass-style-overrides", "FontName=$customFontName")
+            } else {
+                mpv.setOptionString("sub-ass-override", "no")
+            }
+
             mpv.setOptionString("keep-open", "yes")
             mpv.setOptionString("demuxer-max-bytes", "64MiB")
             mpv.setOptionString("demuxer-max-back-bytes", "32MiB")
