@@ -45,6 +45,8 @@ import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.AlertDialog
@@ -88,7 +90,12 @@ import com.unraid.app.data.local.AppErrorLogger
 import com.unraid.app.network.NetworkModule
 import com.unraid.app.network.NetworkProxyManager
 import dev.jdtech.mpv.MPVLib
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.Locale
 import java.util.UUID
 
@@ -111,7 +118,11 @@ data class MpvPlayRequest(
     val subtitle: String = "",
     val startPositionSec: Double = 0.0,
     val headers: Map<String, String> = emptyMap(),
-    val subtitles: List<MpvSubtitleRequest> = emptyList()
+    val subtitles: List<MpvSubtitleRequest> = emptyList(),
+    val hasPrevious: Boolean = false,
+    val hasNext: Boolean = false,
+    val previousTitle: String = "",
+    val nextTitle: String = ""
 )
 
 private data class MpvTrackInfo(
@@ -149,7 +160,9 @@ fun NativeMpvPlayerScreen(
     request: MpvPlayRequest,
     playerSettingsStore: PlayerSettingsStore,
     onProgress: (positionSec: Double, durationSec: Double) -> Unit,
-    onClosed: (positionSec: Double, durationSec: Double, completed: Boolean) -> Unit
+    onClosed: (positionSec: Double, durationSec: Double, completed: Boolean) -> Unit,
+    onNavigateEpisode: ((direction: String, positionSec: Double, durationSec: Double, completed: Boolean) -> Unit)? = null,
+    manageActivityOrientation: Boolean = true
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
@@ -164,6 +177,7 @@ fun NativeMpvPlayerScreen(
     var initError by remember { mutableStateOf<String?>(null) }
     var reachedEof by remember { mutableStateOf(false) }
     var closeReported by remember { mutableStateOf(false) }
+    var switchingMessage by remember { mutableStateOf<String?>(null) }
 
     var isPaused by remember { mutableStateOf(false) }
     var isBuffering by remember { mutableStateOf(true) }
@@ -195,6 +209,33 @@ fun NativeMpvPlayerScreen(
         val dur = durationSeconds.coerceAtLeast(0.0)
         val completed = reachedEof || (dur > 0.0 && pos >= dur * 0.90)
         onClosed(pos, dur, completed)
+    }
+
+    fun triggerEpisodeNavigation(direction: String) {
+        val navigator = onNavigateEpisode ?: return
+        if (switchingMessage != null) return
+        val label = if (direction == "next") {
+            request.nextTitle.ifBlank { "다음화" }
+        } else {
+            request.previousTitle.ifBlank { "이전화" }
+        }
+        switchingMessage = "$label 불러오는 중..."
+        // 새 에피소드로 교체될 때 onDispose가 중복으로 onClosed를 호출하지 않도록 표시
+        closeReported = true
+        runCatching { mpvInstance?.setPropertyString("pause", "yes") }
+        val pos = positionSeconds.coerceAtLeast(0.0)
+        val dur = durationSeconds.coerceAtLeast(0.0)
+        val completed = reachedEof || (dur > 0.0 && pos >= dur * 0.90)
+        navigator(direction, pos, dur, completed)
+    }
+
+    // 에피소드 전환이 실패하거나 타임아웃된 경우 상태 복구
+    LaunchedEffect(switchingMessage) {
+        if (switchingMessage != null) {
+            delay(15_000)
+            switchingMessage = null
+            closeReported = false
+        }
     }
 
     BackHandler(enabled = true) {
@@ -261,16 +302,21 @@ fun NativeMpvPlayerScreen(
     // 가로 몰입 모드 + libmpv 인스턴스 생명주기
     DisposableEffect(request.sessionId) {
         val previousOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        activity?.let { act ->
-            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            act.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            WindowCompat.getInsetsController(act.window, act.window.decorView).apply {
-                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                hide(WindowInsetsCompat.Type.systemBars())
+        if (manageActivityOrientation) {
+            activity?.let { act ->
+                act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                act.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                WindowCompat.getInsetsController(act.window, act.window.decorView).apply {
+                    systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    hide(WindowInsetsCompat.Type.systemBars())
+                }
             }
         }
 
+        val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        var isDisposed = false
         var createdMpv: MPVLib? = null
+        val preferredSubFont = playerSettingsStore.getSettings().subtitleFontName.trim()
 
         val observer = object : MPVLib.EventObserver {
             override fun eventProperty(property: String) = Unit
@@ -286,7 +332,10 @@ fun NativeMpvPlayerScreen(
                     when (property) {
                         "pause" -> isPaused = value
                         "paused-for-cache" -> isBuffering = value
-                        "eof-reached" -> if (value) reachedEof = true
+                        "eof-reached" -> if (value) {
+                            reachedEof = true
+                            controlsVisible = true
+                        }
                     }
                 }
             }
@@ -310,25 +359,66 @@ fun NativeMpvPlayerScreen(
                             val mpv = createdMpv
                             if (mpv != null && !externalSubsLoaded && request.subtitles.isNotEmpty()) {
                                 externalSubsLoaded = true
-                                request.subtitles.forEach { sub ->
-                                    if (sub.url.isNotBlank()) {
-                                        runCatching {
-                                            mpv.command(
-                                                arrayOf(
-                                                    "sub-add",
-                                                    sub.url,
-                                                    "auto",
-                                                    sub.title.ifBlank { "외부 자막" },
-                                                    sub.language.ifBlank { "und" }
-                                                )
-                                            )
-                                        }.onFailure { e ->
-                                            AppErrorLogger.logError(
-                                                tag = "NativeMpv",
-                                                message = "외부 자막 로드 실패 (${sub.title})",
-                                                throwable = e
-                                            )
+                                // 외부 자막(특히 SAMI .smi / CP949 인코딩)을 IO 스레드에서 다운로드·UTF-8/ASS 변환 후 로컬 로드
+                                ioScope.launch {
+                                    val preparedSubs = SubtitlePreprocessor.prepareSubtitles(
+                                        context = context.applicationContext,
+                                        sessionId = request.sessionId,
+                                        subtitles = request.subtitles,
+                                        headers = request.headers,
+                                        preferredFontName = preferredSubFont
+                                    )
+                                    if (isDisposed || preparedSubs.isEmpty()) return@launch
+
+                                    mainHandler.post {
+                                        if (isDisposed) return@post
+                                        // 현재 선택된 내장 한국어 자막이 없다면 첫 번째 외부(한국어 우선) 자막을 자동 활성화
+                                        val currentSid = runCatching { mpv.getPropertyString("sid") }.getOrNull()
+                                        var hasSelectedKoreanTrack = false
+                                        if (!currentSid.isNullOrBlank() && currentSid != "no" && currentSid != "auto") {
+                                            val trackCount = runCatching {
+                                                mpv.getPropertyString("track-list/count")?.toIntOrNull() ?: 0
+                                            }.getOrDefault(0)
+                                            for (i in 0 until trackCount) {
+                                                val tType = mpv.getPropertyString("track-list/$i/type")
+                                                val tSelected = mpv.getPropertyString("track-list/$i/selected") == "yes"
+                                                val tLang = mpv.getPropertyString("track-list/$i/lang").orEmpty().lowercase(Locale.US)
+                                                if (tType == "sub" && tSelected &&
+                                                    (tLang.startsWith("ko") || tLang == "kr" || tLang == "kor")
+                                                ) {
+                                                    hasSelectedKoreanTrack = true
+                                                    break
+                                                }
+                                            }
                                         }
+
+                                        var selectedExternalOnce = false
+                                        preparedSubs.forEach { prepared ->
+                                            val flag = if (!hasSelectedKoreanTrack && !selectedExternalOnce) {
+                                                selectedExternalOnce = true
+                                                "select"
+                                            } else {
+                                                "auto"
+                                            }
+                                            runCatching {
+                                                mpv.command(
+                                                    arrayOf(
+                                                        "sub-add",
+                                                        prepared.filePath,
+                                                        flag,
+                                                        prepared.title.ifBlank { "외부 자막" },
+                                                        prepared.language.ifBlank { "und" }
+                                                    )
+                                                )
+                                            }.onFailure { e ->
+                                                AppErrorLogger.logError(
+                                                    tag = "NativeMpv",
+                                                    message = "외부 자막 로드 실패 (${prepared.title})",
+                                                    throwable = e
+                                                )
+                                            }
+                                        }
+                                        refreshTracks(mpv)
                                     }
                                 }
                             }
@@ -376,6 +466,8 @@ fun NativeMpvPlayerScreen(
             mpv.setOptionString("hwdec-codecs", "h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1")
             mpv.setOptionString("embeddedfonts", "yes")
             mpv.setOptionString("sub-ass", "yes")
+            mpv.setOptionString("slang", "kor,ko,kr,korean")
+            mpv.setOptionString("sub-codepage", "utf8:cp949")
 
             // 앱 내 커스텀 폰트(.ttf/.otf/.ttc) 폴더 및 사용자 폰트 설정 적용
             if (fontsDir.exists() && fontsDir.listFiles()?.isNotEmpty() == true) {
@@ -448,6 +540,9 @@ fun NativeMpvPlayerScreen(
         }
 
         onDispose {
+            isDisposed = true
+            ioScope.cancel()
+
             if (!closeReported) {
                 closeReported = true
                 val pos = positionSeconds.coerceAtLeast(0.0)
@@ -472,12 +567,15 @@ fun NativeMpvPlayerScreen(
                 }
             }
             mpvInstance = null
+            SubtitlePreprocessor.cleanupSession(context.applicationContext, request.sessionId)
 
-            activity?.let { act ->
-                act.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                WindowCompat.getInsetsController(act.window, act.window.decorView)
-                    .show(WindowInsetsCompat.Type.systemBars())
-                act.requestedOrientation = previousOrientation
+            if (manageActivityOrientation) {
+                activity?.let { act ->
+                    act.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    WindowCompat.getInsetsController(act.window, act.window.decorView)
+                        .show(WindowInsetsCompat.Type.systemBars())
+                    act.requestedOrientation = previousOrientation
+                }
             }
         }
     }
@@ -598,13 +696,40 @@ fun NativeMpvPlayerScreen(
             )
         }
 
-        if (isBuffering && initError == null) {
+        if (isBuffering && initError == null && switchingMessage == null) {
             CircularProgressIndicator(
                 modifier = Modifier
                     .align(Alignment.Center)
                     .size(44.dp),
                 color = MaterialTheme.colorScheme.primary
             )
+        }
+
+        // 이전화 / 다음화 전환 로딩 오버레이
+        switchingMessage?.let { msg ->
+            Surface(
+                modifier = Modifier.align(Alignment.Center),
+                color = Color(0xDD111622),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(22.dp),
+                        strokeWidth = 2.5.dp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = msg,
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
         }
 
         if (!initError.isNullOrBlank()) {
@@ -757,12 +882,34 @@ fun NativeMpvPlayerScreen(
                         }
                     }
 
-                    // 중앙 재생 컨트롤
+                    // 중앙 재생 컨트롤 (에피소드 시리즈일 경우 이전화/다음화 버튼 자동 표시)
+                    val showEpisodeNav = onNavigateEpisode != null && (request.hasPrevious || request.hasNext)
                     Row(
                         modifier = Modifier.align(Alignment.Center),
-                        horizontalArrangement = Arrangement.spacedBy(28.dp),
+                        horizontalArrangement = Arrangement.spacedBy(if (showEpisodeNav) 20.dp else 28.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        if (showEpisodeNav) {
+                            Surface(
+                                onClick = {
+                                    if (request.hasPrevious) triggerEpisodeNavigation("previous")
+                                },
+                                enabled = request.hasPrevious && switchingMessage == null,
+                                shape = CircleShape,
+                                color = Color(if (request.hasPrevious) 0x88000000L else 0x44000000L),
+                                modifier = Modifier.size(48.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Filled.SkipPrevious,
+                                        contentDescription = "이전화",
+                                        tint = if (request.hasPrevious) Color.White else Color(0x66FFFFFF),
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                            }
+                        }
+
                         Surface(
                             onClick = {
                                 runCatching { mpvInstance?.command(arrayOf("seek", "-10", "relative")) }
@@ -815,6 +962,64 @@ fun NativeMpvPlayerScreen(
                                     contentDescription = "10초 앞으로",
                                     tint = Color.White,
                                     modifier = Modifier.size(30.dp)
+                                )
+                            }
+                        }
+
+                        if (showEpisodeNav) {
+                            Surface(
+                                onClick = {
+                                    if (request.hasNext) triggerEpisodeNavigation("next")
+                                },
+                                enabled = request.hasNext && switchingMessage == null,
+                                shape = CircleShape,
+                                color = Color(if (request.hasNext) 0x88000000L else 0x44000000L),
+                                modifier = Modifier.size(48.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Filled.SkipNext,
+                                        contentDescription = "다음화",
+                                        tint = if (request.hasNext) Color.White else Color(0x66FFFFFF),
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // 영상 종료(EOF) 시 다음화 바로 재생 플로팅 버튼
+                    if (reachedEof && request.hasNext && onNavigateEpisode != null && switchingMessage == null) {
+                        Surface(
+                            onClick = { triggerEpisodeNavigation("next") },
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(end = 20.dp, bottom = 112.dp),
+                            shape = RoundedCornerShape(24.dp),
+                            color = MaterialTheme.colorScheme.primary
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.SkipNext,
+                                    contentDescription = null,
+                                    tint = Color.Black,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Text(
+                                    text = if (request.nextTitle.isNotBlank()) {
+                                        "다음화 · ${request.nextTitle}"
+                                    } else {
+                                        "다음화 재생"
+                                    },
+                                    color = Color.Black,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
@@ -1087,6 +1292,34 @@ private fun formatMpvTime(secondsDouble: Double): String {
         String.format(Locale.getDefault(), "%d:%02d:%02d", hours, minutes, seconds)
     } else {
         String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
+    }
+}
+
+/**
+ * 플레이어가 열려 있는 동안(이전화/다음화 에피소드 전환 포함) 가로 몰입 모드를 끊김 없이 유지합니다.
+ */
+@Composable
+fun PlayerImmersiveOrientationEffect() {
+    val context = LocalContext.current
+    val activity = remember(context) { context.findActivity() }
+    DisposableEffect(activity) {
+        val previousOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        activity?.let { act ->
+            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            act.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            WindowCompat.getInsetsController(act.window, act.window.decorView).apply {
+                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                hide(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+        onDispose {
+            activity?.let { act ->
+                act.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                WindowCompat.getInsetsController(act.window, act.window.decorView)
+                    .show(WindowInsetsCompat.Type.systemBars())
+                act.requestedOrientation = previousOrientation
+            }
+        }
     }
 }
 

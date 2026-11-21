@@ -81,7 +81,9 @@ import com.unraid.app.data.local.AppErrorLogger
 import com.unraid.app.network.NetworkModule
 import com.unraid.app.player.MpvPlayRequest
 import com.unraid.app.player.NativeMpvPlayerScreen
+import com.unraid.app.player.PlayerImmersiveOrientationEffect
 import com.unraid.app.player.PlayerSettingsStore
+import okhttp3.Request
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileInputStream
@@ -164,7 +166,7 @@ fun PluginRuntimeScreen(
                 setSupportZoom(false)
                 javaScriptCanOpenWindowsAutomatically = true
                 mediaPlaybackRequiresUserGesture = false
-                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 cacheMode = WebSettings.LOAD_DEFAULT
             }
 
@@ -182,8 +184,31 @@ fun PluginRuntimeScreen(
                 ): WebResourceResponse? {
                     val uri = request?.url ?: return null
                     if (uri.host.equals(InstalledPlugin.PLUGIN_VIRTUAL_HOST, ignoreCase = true)) {
+                        if (uri.path == UnraidHubJsBridge.PROXY_PATH_PREFIX) {
+                            val targetUrl = uri.getQueryParameter("url").orEmpty().trim()
+                            return proxySubresourceViaOkHttp(targetUrl, request.requestHeaders.orEmpty())
+                        }
                         return assetLoader.shouldInterceptRequest(uri)
                     }
+
+                    // 외부 도커 서비스의 이미지 서브 리소스도 OkHttp(tsnet + 사설 SSL 허용)로 자동 경유
+                    if (!request.isForMainFrame &&
+                        request.method.equals("GET", ignoreCase = true) &&
+                        (uri.scheme.equals("http", ignoreCase = true) ||
+                            uri.scheme.equals("https", ignoreCase = true))
+                    ) {
+                        val accept = request.requestHeaders?.entries
+                            ?.firstOrNull { it.key.equals("Accept", ignoreCase = true) }
+                            ?.value
+                            .orEmpty()
+                        val path = uri.path.orEmpty()
+                        if (accept.contains("image/", ignoreCase = true) ||
+                            path.contains("/Images/", ignoreCase = true)
+                        ) {
+                            return proxySubresourceViaOkHttp(uri.toString(), request.requestHeaders.orEmpty())
+                        }
+                    }
+
                     return super.shouldInterceptRequest(view, request)
                 }
 
@@ -363,6 +388,9 @@ fun PluginRuntimeScreen(
         }
 
         // 2) window.UnraidHub.playVideo() 호출 시 전체 화면 가로 몰입 libmpv 플레이어 오버레이
+        if (activePlayRequest != null) {
+            PlayerImmersiveOrientationEffect()
+        }
         activePlayRequest?.let { playReq ->
             key(playReq.sessionId) {
                 NativeMpvPlayerScreen(
@@ -372,9 +400,15 @@ fun PluginRuntimeScreen(
                         bridge.dispatchPlayerProgress(posSec, durSec)
                     },
                     onClosed = { posSec, durSec, completed ->
-                        activePlayRequest = null
+                        if (activePlayRequest?.sessionId == playReq.sessionId) {
+                            activePlayRequest = null
+                        }
                         bridge.dispatchPlayerClosed(posSec, durSec, completed)
-                    }
+                    },
+                    onNavigateEpisode = { direction, posSec, durSec, completed ->
+                        bridge.dispatchPlayerAction(direction, posSec, durSec, completed)
+                    },
+                    manageActivityOrientation = false
                 )
             }
         }
@@ -709,5 +743,106 @@ private class PluginAssetPathHandler(
             "txt" -> "text/plain"
             else -> "application/octet-stream"
         }
+    }
+}
+
+/**
+ * 플러그인 WebView의 이미지/미디어 리소스를 앱의 NetworkModule.okHttpClient로 프록시합니다.
+ * - 가상 HTTPS 도메인(https://plugins.unraidhub.local)에서 사설 HTTP/자체 서명 HTTPS/Tailscale(tsnet)
+ *   도커 서버의 이미지를 Mixed Content, 사설 SSL, Private Network Access 차단 없이 안정적으로 로드합니다.
+ */
+private fun proxySubresourceViaOkHttp(
+    targetUrl: String,
+    requestHeaders: Map<String, String>
+): WebResourceResponse {
+    if (!targetUrl.startsWith("http://", ignoreCase = true) &&
+        !targetUrl.startsWith("https://", ignoreCase = true)
+    ) {
+        return WebResourceResponse(
+            "text/plain",
+            "utf-8",
+            400,
+            "Bad Request",
+            mapOf("Access-Control-Allow-Origin" to "*"),
+            ByteArrayInputStream(ByteArray(0))
+        )
+    }
+
+    return try {
+        val reqBuilder = Request.Builder()
+            .url(targetUrl)
+            .get()
+
+        requestHeaders.forEach { (key, value) ->
+            // 호스트/오리진/프록시 충돌을 유발할 수 있는 헤더 제외
+            if (key.equals("Accept", ignoreCase = true) ||
+                key.equals("Accept-Language", ignoreCase = true) ||
+                key.equals("User-Agent", ignoreCase = true)
+            ) {
+                reqBuilder.header(key, value)
+            }
+        }
+
+        NetworkModule.okHttpClient.newCall(reqBuilder.build()).execute().use { response ->
+            val statusCode = response.code.coerceIn(100, 599)
+            val reasonPhrase = response.message.ifBlank { defaultHttpReason(statusCode) }
+            val rawContentType = response.header("Content-Type").orEmpty()
+            val mimeType = rawContentType
+                .substringBefore(';')
+                .trim()
+                .ifBlank { "application/octet-stream" }
+            val encoding = if (mimeType.startsWith("text/") ||
+                mimeType == "application/json" ||
+                mimeType == "image/svg+xml"
+            ) {
+                rawContentType.substringAfter("charset=", "")
+                    .substringBefore(';')
+                    .trim()
+                    .ifBlank { "utf-8" }
+            } else {
+                null
+            }
+
+            val bytes = response.body?.bytes() ?: ByteArray(0)
+            val responseHeaders = LinkedHashMap<String, String>()
+            responseHeaders["Access-Control-Allow-Origin"] = "*"
+            if (response.isSuccessful && mimeType.startsWith("image/", ignoreCase = true)) {
+                responseHeaders["Cache-Control"] = "public, max-age=86400"
+            }
+
+            WebResourceResponse(
+                mimeType,
+                encoding,
+                statusCode,
+                reasonPhrase,
+                responseHeaders,
+                ByteArrayInputStream(bytes)
+            )
+        }
+    } catch (_: Exception) {
+        WebResourceResponse(
+            "text/plain",
+            "utf-8",
+            502,
+            "Bad Gateway",
+            mapOf("Access-Control-Allow-Origin" to "*"),
+            ByteArrayInputStream(ByteArray(0))
+        )
+    }
+}
+
+private fun defaultHttpReason(code: Int): String {
+    return when (code) {
+        200 -> "OK"
+        204 -> "No Content"
+        304 -> "Not Modified"
+        400 -> "Bad Request"
+        401 -> "Unauthorized"
+        403 -> "Forbidden"
+        404 -> "Not Found"
+        500 -> "Internal Server Error"
+        502 -> "Bad Gateway"
+        503 -> "Service Unavailable"
+        else -> "HTTP $code"
     }
 }

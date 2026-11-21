@@ -54,7 +54,11 @@ private data class JsPlayVideoPayload(
     val subtitle: String = "",
     val startPositionSec: Double = 0.0,
     val headers: Map<String, String> = emptyMap(),
-    val subtitles: List<JsSubtitlePayload> = emptyList()
+    val subtitles: List<JsSubtitlePayload> = emptyList(),
+    val hasPrevious: Boolean = false,
+    val hasNext: Boolean = false,
+    val previousTitle: String = "",
+    val nextTitle: String = ""
 )
 
 @Serializable
@@ -76,6 +80,14 @@ private data class JsPlayerProgressEvent(
 
 @Serializable
 private data class JsPlayerClosedEvent(
+    val positionSec: Double,
+    val durationSec: Double,
+    val completed: Boolean
+)
+
+@Serializable
+private data class JsPlayerActionEvent(
+    val action: String,
     val positionSec: Double,
     val durationSec: Double,
     val completed: Boolean
@@ -245,7 +257,11 @@ class UnraidHubJsBridge(
                             title = sub.title,
                             language = sub.language.ifBlank { "und" }
                         )
-                    }
+                    },
+                hasPrevious = payload.hasPrevious,
+                hasNext = payload.hasNext,
+                previousTitle = payload.previousTitle,
+                nextTitle = payload.nextTitle
             )
             mainHandler.post {
                 if (!isDisposed) {
@@ -346,6 +362,26 @@ class UnraidHubJsBridge(
         dispatchCustomEvent(EVENT_PLAYER_CLOSED, detailJson)
     }
 
+    /**
+     * 내장 libmpv 플레이어 내부 이전화/다음화 전환 액션 이벤트를 플러그인 WebView로 전달합니다.
+     */
+    fun dispatchPlayerAction(
+        action: String,
+        positionSec: Double,
+        durationSec: Double,
+        completed: Boolean
+    ) {
+        val detailJson = json.encodeToString(
+            JsPlayerActionEvent(
+                action = action,
+                positionSec = positionSec,
+                durationSec = durationSec,
+                completed = completed
+            )
+        )
+        dispatchCustomEvent(EVENT_PLAYER_ACTION, detailJson)
+    }
+
     private fun dispatchCustomEvent(eventName: String, detailJson: String) {
         if (isDisposed) return
         val jsEventName = toJsStringLiteral(eventName)
@@ -393,6 +429,8 @@ class UnraidHubJsBridge(
         const val NATIVE_INTERFACE_NAME = "__UnraidHubNative"
         const val EVENT_PLAYER_PROGRESS = "unraidhub:playerProgress"
         const val EVENT_PLAYER_CLOSED = "unraidhub:playerClosed"
+        const val EVENT_PLAYER_ACTION = "unraidhub:playerAction"
+        const val PROXY_PATH_PREFIX = "/__proxy__"
 
         /**
          * 플러그인 HTML에 자동 주입되어 async/await 기반 window.UnraidHub API를 노출하는 부트스트랩 스크립트.
@@ -499,7 +537,11 @@ class UnraidHubJsBridge(
                         subtitle: String(opts.subtitle || ''),
                         startPositionSec: Number(opts.startPositionSec || 0),
                         headers: opts.headers || {},
-                        subtitles: Array.isArray(opts.subtitles) ? opts.subtitles : []
+                        subtitles: Array.isArray(opts.subtitles) ? opts.subtitles : [],
+                        hasPrevious: Boolean(opts.hasPrevious),
+                        hasNext: Boolean(opts.hasNext),
+                        previousTitle: String(opts.previousTitle || ''),
+                        nextTitle: String(opts.nextTitle || '')
                       });
                       var errMsg = getNative().playVideo(payload);
                       if (errMsg) {
@@ -511,6 +553,18 @@ class UnraidHubJsBridge(
                       reject(e);
                     }
                   });
+                },
+
+                proxyUrl: function(rawUrl) {
+                  var target = String(rawUrl || '').trim();
+                  if (!target) return '';
+                  if (/^https?:\/\/${InstalledPlugin.PLUGIN_VIRTUAL_HOST}\//i.test(target)) {
+                    return target;
+                  }
+                  if (!/^https?:\/\//i.test(target)) {
+                    return target;
+                  }
+                  return 'https://${InstalledPlugin.PLUGIN_VIRTUAL_HOST}${PROXY_PATH_PREFIX}?url=' + encodeURIComponent(target);
                 },
 
                 getContext: function() {

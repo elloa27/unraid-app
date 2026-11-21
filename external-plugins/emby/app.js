@@ -52,6 +52,7 @@
     librarySort: 'name_asc',
     stack: [],
     activePlaybackSession: null,
+    activePlaybackContext: null,
     homeData: {
       loading: false,
       error: '',
@@ -218,6 +219,7 @@
     const detail = (event && event.detail) || {};
     const session = state.activePlaybackSession;
     state.activePlaybackSession = null;
+    state.activePlaybackContext = null;
 
     if (session) {
       try {
@@ -232,6 +234,47 @@
     // 방금 시청한 진행률이 화면에 바로 반영되도록 현재 뷰와 홈 데이터 조용히 갱신
     refreshCurrentViewAfterPlayback();
   });
+
+  // 플레이어 내부에서 [이전화] / [다음화] 버튼을 눌렀을 때 플레이어를 닫지 않고 바로 다음 에피소드 재생
+  window.addEventListener('unraidhub:playerAction', async (event) => {
+    const detail = (event && event.detail) || {};
+    const action = detail.action;
+    if (action !== 'next' && action !== 'previous') return;
+
+    const prevSession = state.activePlaybackSession;
+    const ctx = state.activePlaybackContext;
+    const targetEp = ctx ? (action === 'next' ? ctx.nextEp : ctx.prevEp) : null;
+
+    if (prevSession) {
+      api.reportPlaybackStopped(prevSession, detail.positionSec || 0).catch((err) => {
+        if (window.UnraidHub && window.UnraidHub.logError) {
+          window.UnraidHub.logError('PlaybackSync', '에피소드 전환 시 이전 화 종료 보고 실패', err.detail || err.message);
+        }
+      });
+    }
+
+    if (!targetEp) {
+      showToast(action === 'next' ? '다음 에피소드가 없습니다.' : '이전 에피소드가 없습니다.');
+      return;
+    }
+
+    // 뒤쪽 화면이 상세 화면이라면 새로 전환된 에피소드로 동기화
+    const top = currentView();
+    if (top && top.type === 'detail') {
+      top.itemId = targetEp.Id;
+      top.item = targetEp;
+      top.siblingEpisodes = (ctx && Array.isArray(ctx.siblings)) ? ctx.siblings : top.siblingEpisodes;
+      render();
+    }
+
+    await playEmbyItem(targetEp, true, ctx ? ctx.siblings : null);
+  });
+
+  function formatEpisodeNavLabel(ep) {
+    if (!ep) return '';
+    const code = window.EmbyUtils.formatEpisodeCode(ep);
+    return [code, ep.Name].filter(Boolean).join(' · ') || ep.Name || '';
+  }
 
   async function refreshCurrentViewAfterPlayback() {
     try {
@@ -249,7 +292,7 @@
     } catch (_) {}
   }
 
-  async function playEmbyItem(item, resume = true) {
+  async function playEmbyItem(item, resume = true, knownSiblings = null) {
     try {
       let fullItem = item;
       const hasMediaSources = Array.isArray(item.MediaSources) && item.MediaSources.length > 0;
@@ -258,8 +301,39 @@
         fullItem = await api.getItemDetail(item.Id);
       }
 
-      const { session, playVideoOptions } = api.buildDirectPlayRequest(fullItem, resume);
+      // 에피소드인 경우 같은 시즌의 에피소드 목록을 확보해 플레이어 내 이전화/다음화 버튼 활성화
+      let siblings = Array.isArray(knownSiblings) && knownSiblings.length > 0 ? knownSiblings : [];
+      if (fullItem && fullItem.Type === 'Episode' && fullItem.SeriesId && siblings.length === 0) {
+        try {
+          siblings = await api.getEpisodes(fullItem.SeriesId, fullItem.SeasonId || '');
+        } catch (_) {
+          siblings = [];
+        }
+      }
+
+      let prevEp = null;
+      let nextEp = null;
+      if (fullItem && fullItem.Type === 'Episode' && siblings.length > 0) {
+        const idx = siblings.findIndex((e) => e.Id === fullItem.Id);
+        if (idx > 0) prevEp = siblings[idx - 1];
+        if (idx >= 0 && idx < siblings.length - 1) nextEp = siblings[idx + 1];
+      }
+
+      const navInfo = {
+        hasPrevious: Boolean(prevEp),
+        hasNext: Boolean(nextEp),
+        previousTitle: formatEpisodeNavLabel(prevEp),
+        nextTitle: formatEpisodeNavLabel(nextEp)
+      };
+
+      const { session, playVideoOptions } = api.buildDirectPlayRequest(fullItem, resume, navInfo);
       state.activePlaybackSession = session;
+      state.activePlaybackContext = {
+        item: fullItem,
+        siblings,
+        prevEp,
+        nextEp
+      };
 
       // Emby 서버에 재생 시작 보고 (비동기, 실패해도 재생은 계속 진행)
       api.reportPlaybackStarted(session, playVideoOptions.startPositionSec).catch((err) => {
@@ -271,6 +345,7 @@
       await window.UnraidHub.playVideo(playVideoOptions);
     } catch (err) {
       state.activePlaybackSession = null;
+      state.activePlaybackContext = null;
       reportPluginError('PlayVideo', err.message || '동영상 재생을 시작할 수 없습니다.', err);
     }
   }
@@ -506,9 +581,24 @@
 
   function bindFallbackImages(root = appEl) {
     root.querySelectorAll('img[data-fallback-img]').forEach((img) => {
-      img.addEventListener('error', () => {
+      const markLoaded = () => {
+        img.classList.add('is-loaded');
+      };
+      const markFailed = () => {
         img.style.display = 'none';
-      }, { once: true });
+      };
+
+      if (img.complete) {
+        if (img.naturalWidth > 0) {
+          markLoaded();
+        } else {
+          markFailed();
+        }
+        return;
+      }
+
+      img.addEventListener('load', markLoaded, { once: true });
+      img.addEventListener('error', markFailed, { once: true });
     });
   }
 
@@ -1056,7 +1146,7 @@
     appEl.querySelectorAll('[data-play-ep-id]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const ep = view.episodes.find((e) => e.Id === btn.dataset.playEpId);
-        if (ep) playEmbyItem(ep, true);
+        if (ep) playEmbyItem(ep, true, view.episodes);
       });
     });
   }
@@ -1187,11 +1277,11 @@
 
     const resumeBtn = document.getElementById('btn-play-resume');
     if (resumeBtn) {
-      resumeBtn.addEventListener('click', () => playEmbyItem(item, true));
+      resumeBtn.addEventListener('click', () => playEmbyItem(item, true, view.siblingEpisodes));
     }
     const startBtn = document.getElementById('btn-play-start');
     if (startBtn) {
-      startBtn.addEventListener('click', () => playEmbyItem(item, false));
+      startBtn.addEventListener('click', () => playEmbyItem(item, false, view.siblingEpisodes));
     }
     const prevBtn = document.getElementById('btn-prev-ep');
     if (prevBtn && prevEp) {

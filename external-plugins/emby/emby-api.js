@@ -255,6 +255,8 @@
     async getSeasons(seriesId) {
       const qs = new URLSearchParams({
         UserId: this.userId,
+        ImageTypeLimit: '1',
+        EnableImageTypes: 'Primary,Backdrop,Thumb',
         Fields: 'PrimaryImageAspectRatio,UserData,Overview'
       });
       const data = await this.request(`/Shows/${encodeURIComponent(seriesId)}/Seasons?${qs}`);
@@ -267,6 +269,8 @@
     async getEpisodes(seriesId, seasonId = '') {
       const qs = new URLSearchParams({
         UserId: this.userId,
+        ImageTypeLimit: '1',
+        EnableImageTypes: 'Primary,Backdrop,Thumb',
         Fields: 'Overview,MediaSources,MediaStreams,UserData,RunTimeTicks,SeriesId,SeriesName,SeasonId,ParentIndexNumber,IndexNumber'
       });
       if (seasonId) qs.set('SeasonId', seasonId);
@@ -275,7 +279,7 @@
     }
 
     /**
-     * Emby 이미지 URL 생성 (WebView 프록시 경유)
+     * Emby 이미지 URL 생성 (네이티브 OkHttp 이미지 프록시 우선 경유로 Mixed Content / 사설 SSL / tsnet 문제 완전 해소)
      */
     buildImageUrl(itemId, imageType = 'Primary', maxWidth = 400, tag = '') {
       if (!this.baseUrl || !itemId) return '';
@@ -285,11 +289,15 @@
       });
       if (this.accessToken) qs.set('api_key', this.accessToken);
       if (tag) qs.set('tag', tag);
-      return `${this.baseUrl}/Items/${encodeURIComponent(itemId)}/Images/${encodeURIComponent(imageType)}?${qs}`;
+      const rawUrl = `${this.baseUrl}/Items/${encodeURIComponent(itemId)}/Images/${encodeURIComponent(imageType)}?${qs}`;
+      if (window.UnraidHub && typeof window.UnraidHub.proxyUrl === 'function') {
+        return window.UnraidHub.proxyUrl(rawUrl);
+      }
+      return rawUrl;
     }
 
     /**
-     * 아이템 포스터 URL 선택 (Primary 우선, 없으면 시리즈 포스터)
+     * 아이템 포스터 URL 선택 (Primary 우선, 없으면 시리즈/상위/Thumb/Backdrop 순으로 폴백)
      */
     getPosterUrl(item, maxWidth = 400) {
       if (!item) return '';
@@ -298,6 +306,18 @@
       }
       if (item.SeriesId && item.SeriesPrimaryImageTag) {
         return this.buildImageUrl(item.SeriesId, 'Primary', maxWidth, item.SeriesPrimaryImageTag);
+      }
+      if (item.ParentId && item.ParentPrimaryImageTag) {
+        return this.buildImageUrl(item.ParentId, 'Primary', maxWidth, item.ParentPrimaryImageTag);
+      }
+      if (item.ImageTags && item.ImageTags.Thumb) {
+        return this.buildImageUrl(item.Id, 'Thumb', maxWidth, item.ImageTags.Thumb);
+      }
+      if (item.BackdropImageTags && item.BackdropImageTags.length > 0) {
+        return this.buildImageUrl(item.Id, 'Backdrop', maxWidth, item.BackdropImageTags[0]);
+      }
+      if (item.ParentBackdropItemId && item.ParentBackdropImageTags && item.ParentBackdropImageTags.length > 0) {
+        return this.buildImageUrl(item.ParentBackdropItemId, 'Backdrop', maxWidth, item.ParentBackdropImageTags[0]);
       }
       return this.buildImageUrl(item.Id, 'Primary', maxWidth);
     }
@@ -345,7 +365,7 @@
     /**
      * 내장 libmpv Direct Play용 페이로드 및 세션 메타 생성
      */
-    buildDirectPlayRequest(item, resume = true) {
+    buildDirectPlayRequest(item, resume = true, navInfo = null) {
       const mediaSources = Array.isArray(item.MediaSources) ? item.MediaSources : [];
       const mediaSource = mediaSources[0] || null;
       const mediaSourceId = (mediaSource && mediaSource.Id) || item.Id;
@@ -358,25 +378,42 @@
       if (this.accessToken) streamQs.set('api_key', this.accessToken);
       const streamUrl = `${this.baseUrl}/Videos/${encodeURIComponent(item.Id)}/stream?${streamQs}`;
 
-      // 외부 자막 스트림 추출
+      // 외부 자막 스트림 추출 (SAMI .smi 확장자 정규화 및 한국어 자막 우선 정렬)
       const streams = (mediaSource && Array.isArray(mediaSource.MediaStreams))
         ? mediaSource.MediaStreams
         : (Array.isArray(item.MediaStreams) ? item.MediaStreams : []);
 
+      const isKoreanStream = (s) => {
+        const lang = String(s.Language || '').toLowerCase();
+        const title = String(s.DisplayTitle || s.Title || '').toLowerCase();
+        return lang.startsWith('ko') || lang === 'kr' || lang === 'kor' ||
+          title.includes('한국') || title.includes('한글') || title.includes('korean') || title.includes('kor');
+      };
+
+      const mapSubtitleExt = (rawCodec) => {
+        const codec = String(rawCodec || 'srt').toLowerCase().replace(/[^a-z0-9]/g, '') || 'srt';
+        if (codec === 'subrip' || codec === 'movtext' || codec === 'tx3g' || codec === 'text') return 'srt';
+        if (codec === 'sami' || codec === 'smi') return 'smi';
+        if (codec === 'webvtt' || codec === 'vtt') return 'vtt';
+        return codec;
+      };
+
       const subtitles = streams
         .filter((s) => s && s.Type === 'Subtitle' && s.IsExternal)
+        .sort((a, b) => Number(isKoreanStream(b)) - Number(isKoreanStream(a)))
         .map((s) => {
           let subUrl = '';
           if (s.DeliveryUrl) {
-            const abs = /^https?:\/\//i.test(s.DeliveryUrl)
+            let abs = /^https?:\/\//i.test(s.DeliveryUrl)
               ? s.DeliveryUrl
               : `${this.baseUrl}${s.DeliveryUrl.startsWith('/') ? '' : '/'}${s.DeliveryUrl}`;
+            // Emby가 /Stream.sami 로 내려줄 경우 원시 SAMI 다운로드 호환성이 높은 /Stream.smi 로 보정
+            abs = abs.replace(/\/Stream\.sami(?=$|\?)/i, '/Stream.smi');
             subUrl = abs.includes('api_key=') || !this.accessToken
               ? abs
               : `${abs}${abs.includes('?') ? '&' : '?'}api_key=${encodeURIComponent(this.accessToken)}`;
           } else {
-            const codec = String(s.Codec || 'srt').toLowerCase().replace(/[^a-z0-9]/g, '') || 'srt';
-            const ext = codec === 'subrip' ? 'srt' : codec;
+            const ext = mapSubtitleExt(s.Codec);
             const subQs = this.accessToken ? `?api_key=${encodeURIComponent(this.accessToken)}` : '';
             subUrl = `${this.baseUrl}/Videos/${encodeURIComponent(item.Id)}/${encodeURIComponent(mediaSourceId)}/Subtitles/${s.Index}/Stream.${ext}${subQs}`;
           }
@@ -415,7 +452,11 @@
           subtitle,
           startPositionSec,
           headers: this.accessToken ? { 'X-Emby-Token': this.accessToken } : {},
-          subtitles
+          subtitles,
+          hasPrevious: Boolean(navInfo && navInfo.hasPrevious),
+          hasNext: Boolean(navInfo && navInfo.hasNext),
+          previousTitle: (navInfo && navInfo.previousTitle) || '',
+          nextTitle: (navInfo && navInfo.nextTitle) || ''
         }
       };
     }
