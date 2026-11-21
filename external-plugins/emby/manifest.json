@@ -1,0 +1,12 @@
+{
+  "id": "emby",
+  "name": "Emby 전용 UI",
+  "version": "1.0.0",
+  "description": "Emby 라이브러리 탐색 및 내장 libmpv Direct Play 플러그인",
+  "entry": "index.html",
+  "updateUrl": "https://raw.githubusercontent.com/elloa27/unraid-app/main/external-plugins/emby-plugin.zip",
+  "match": {
+    "keywords": ["emby"],
+    "ports": [8096, 8920]
+  }
+}

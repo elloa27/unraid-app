@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0e14" />
+  <title>Emby 전용 UI</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app" class="app-root">
+    <div class="boot-screen">
+      <div class="spinner"></div>
+      <p class="boot-text">Emby 연결 준비 중...</p>
+    </div>
+  </div>
+
+  <!-- 설정 모달 컨테이너 -->
+  <div id="modal-root" class="modal-backdrop hidden" role="dialog" aria-modal="true"></div>
+
+  <!-- 하단 토스트 알림 컨테이너 -->
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
+
+  <script src="emby-api.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

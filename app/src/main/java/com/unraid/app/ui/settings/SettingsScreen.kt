@@ -32,6 +32,8 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material.icons.filled.FontDownload
@@ -146,6 +148,7 @@ fun SettingsScreen(
 
     // 내장 libmpv 자막 폰트 UI 상태
     var installedFonts by remember { mutableStateOf(MpvFontStorage.listInstalledFonts(context)) }
+    var isFontListExpanded by remember { mutableStateOf(false) }
     var subtitleFontNameInput by remember(playerSettings.subtitleFontName) {
         mutableStateOf(playerSettings.subtitleFontName)
     }
@@ -1060,39 +1063,75 @@ fun SettingsScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         } else {
-                            installedFonts.forEach { fontFile ->
-                                Surface(
-                                    color = MaterialTheme.colorScheme.surfaceVariant,
-                                    shape = RoundedCornerShape(10.dp)
+                            // 다량의 폰트를 추가해도 화면이 길어지지 않도록 접기/펼치기 지원
+                            Surface(
+                                onClick = { isFontListExpanded = !isFontListExpanded },
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 12.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text(
-                                            text = fontFile.name,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            modifier = Modifier.weight(1f),
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        IconButton(
-                                            onClick = {
-                                                MpvFontStorage.deleteFont(fontFile)
-                                                installedFonts = MpvFontStorage.listInstalledFonts(context)
-                                                viewModel.showMessage("폰트 '${fontFile.name}'을(를) 삭제했습니다.")
-                                            },
-                                            modifier = Modifier.size(32.dp)
+                                    Text(
+                                        text = "등록된 자막 폰트 ${installedFonts.size}개 (${if (isFontListExpanded) "접기" else "펼치기"})",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Icon(
+                                        imageVector = if (isFontListExpanded) {
+                                            Icons.Filled.ExpandLess
+                                        } else {
+                                            Icons.Filled.ExpandMore
+                                        },
+                                        contentDescription = if (isFontListExpanded) "폰트 목록 접기" else "폰트 목록 펼치기",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+
+                            if (isFontListExpanded) {
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    installedFonts.forEach { fontFile ->
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.surfaceVariant,
+                                            shape = RoundedCornerShape(10.dp)
                                         ) {
-                                            Icon(
-                                                imageVector = Icons.Filled.Delete,
-                                                contentDescription = "폰트 삭제",
-                                                tint = StatusRed,
-                                                modifier = Modifier.size(18.dp)
-                                            )
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Text(
+                                                    text = fontFile.name,
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    modifier = Modifier.weight(1f),
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                IconButton(
+                                                    onClick = {
+                                                        MpvFontStorage.deleteFont(fontFile)
+                                                        installedFonts = MpvFontStorage.listInstalledFonts(context)
+                                                        viewModel.showMessage("폰트 '${fontFile.name}'을(를) 삭제했습니다.")
+                                                    },
+                                                    modifier = Modifier.size(32.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Filled.Delete,
+                                                        contentDescription = "폰트 삭제",
+                                                        tint = StatusRed,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
