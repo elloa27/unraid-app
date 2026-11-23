@@ -15,13 +15,15 @@
     </div>
   </div>
 
-  <!-- 설정 모달 컨테이너 -->
-  <div id="modal-root" class="modal-backdrop hidden" role="dialog" aria-modal="true"></div>
+  <!-- 바텀시트 및 모달 오버레이 스택 컨테이너 -->
+  <div id="overlay-root"></div>
+
+  <!-- 다음 화 자동 재생 카운트다운 오버레이 -->
+  <div id="countdown-root" class="countdown-backdrop hidden" role="dialog" aria-modal="true"></div>
 
   <!-- 하단 토스트 알림 컨테이너 -->
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
 
-  <script src="emby-api.js"></script>
-  <script src="app.js"></script>
+  <script type="module" src="js/main.js"></script>
 </body>
 </html>
