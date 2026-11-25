@@ -265,14 +265,6 @@ fun MainScreen(
                 onNavigateToSettings = {
                     activeSessionServiceId = null
                     currentTab = AppDestination.SETTINGS
-                },
-                onExitWhenNoHistory = if (isUnraidWebGui) {
-                    {
-                        activeSessionServiceId = null
-                        currentTab = AppDestination.DASHBOARD
-                    }
-                } else {
-                    null
                 }
             )
         } else {
