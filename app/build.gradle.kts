@@ -86,6 +86,13 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "/META-INF/INDEX.LIST"
+            excludes += "/META-INF/DEPENDENCIES"
+            excludes += "/META-INF/LICENSE"
+            excludes += "/META-INF/LICENSE.txt"
+            excludes += "/META-INF/NOTICE"
+            excludes += "/META-INF/NOTICE.txt"
+            excludes += "/META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         }
     }
 }
@@ -122,4 +129,7 @@ dependencies {
 
     // 내장 네이티브 비디오 플레이어(libmpv)
     implementation(libs.libmpv)
+
+    // Unraid SMB2/SMB3 파일 탐색 및 스트리밍 클라이언트
+    implementation(libs.smbj)
 }

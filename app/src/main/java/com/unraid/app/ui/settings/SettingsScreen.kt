@@ -135,6 +135,7 @@ fun SettingsScreen(
 
     var showApiKey by remember { mutableStateOf(false) }
     var showTsAuthKey by remember { mutableStateOf(false) }
+    var showSmbPassword by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
     var editingService by remember { mutableStateOf<DockerServiceBookmark?>(null) }
     var deletingService by remember { mutableStateOf<DockerServiceBookmark?>(null) }
@@ -659,6 +660,172 @@ fun SettingsScreen(
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text("상태 초기화", color = StatusRed)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2-B. SMB 공유 드라이브 계정 설정 카드
+            item(key = "smb_credentials_card") {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text(
+                            text = "SMB 파일 공유 계정 (공유 드라이브)",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = 12.dp)
+                            ) {
+                                Text(
+                                    text = "게스트(익명) 접속 사용",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "공개(Public) 공유만 이용할 때 켜세요.",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = uiState.smbUseGuest,
+                                onCheckedChange = viewModel::onSmbUseGuestChanged
+                            )
+                        }
+
+                        if (!uiState.smbUseGuest) {
+                            OutlinedTextField(
+                                value = uiState.smbUsernameInput,
+                                onValueChange = viewModel::onSmbUsernameChanged,
+                                label = { Text("SMB 사용자 이름") },
+                                placeholder = { Text("Unraid 사용자 아이디") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+
+                            OutlinedTextField(
+                                value = uiState.smbPasswordInput,
+                                onValueChange = viewModel::onSmbPasswordChanged,
+                                label = { Text("SMB 비밀번호 (암호화 보관)") },
+                                singleLine = true,
+                                visualTransformation = if (showSmbPassword) {
+                                    VisualTransformation.None
+                                } else {
+                                    PasswordVisualTransformation()
+                                },
+                                trailingIcon = {
+                                    IconButton(onClick = { showSmbPassword = !showSmbPassword }) {
+                                        Icon(
+                                            imageVector = if (showSmbPassword) {
+                                                Icons.Filled.VisibilityOff
+                                            } else {
+                                                Icons.Filled.Visibility
+                                            },
+                                            contentDescription = "SMB 비밀번호 표시 전환"
+                                        )
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+
+                        OutlinedTextField(
+                            value = uiState.smbCustomHostInput,
+                            onValueChange = viewModel::onSmbCustomHostChanged,
+                            label = { Text("사용자 지정 SMB 호스트 (선택)") },
+                            placeholder = { Text("비워두면 Unraid 서버 주소에서 자동 추출") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        val smbTest = uiState.smbConnectionTest
+                        if (smbTest.isTesting || !smbTest.message.isNullOrBlank()) {
+                            val tint = when (smbTest.isSuccess) {
+                                true -> StatusGreen
+                                false -> StatusRed
+                                null -> MaterialTheme.colorScheme.primary
+                            }
+                            Surface(
+                                color = tint.copy(alpha = 0.14f),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    if (smbTest.isTesting) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(18.dp),
+                                            strokeWidth = 2.dp,
+                                            color = tint
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = if (smbTest.isSuccess == true) {
+                                                Icons.Filled.CheckCircle
+                                            } else {
+                                                Icons.Filled.Error
+                                            },
+                                            contentDescription = null,
+                                            tint = tint,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = smbTest.message.orEmpty(),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = tint
+                                    )
+                                }
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = viewModel::testSmbConnection,
+                                enabled = !uiState.smbConnectionTest.isTesting,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.WifiFind,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("SMB 테스트")
+                            }
+
+                            Button(
+                                onClick = viewModel::saveSmbSettings,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Save,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("SMB 저장")
                             }
                         }
                     }

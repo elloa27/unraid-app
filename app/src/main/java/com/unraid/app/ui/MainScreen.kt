@@ -13,6 +13,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -25,6 +26,8 @@ import com.unraid.app.data.model.AutoDockerOverride
 import com.unraid.app.data.model.DockerContainerItem
 import com.unraid.app.data.model.WebServiceSource
 import com.unraid.app.network.NetworkProxyManager
+import com.unraid.app.player.NativeMpvPlayerScreen
+import com.unraid.app.player.PlayerImmersiveOrientationEffect
 import com.unraid.app.player.PlayerSettingsStore
 import com.unraid.app.plugin.ExternalPluginManager
 import com.unraid.app.plugin.InstalledPlugin
@@ -37,6 +40,8 @@ import com.unraid.app.ui.dashboard.DashboardViewModel
 import com.unraid.app.ui.navigation.AppDestination
 import com.unraid.app.ui.settings.SettingsScreen
 import com.unraid.app.ui.settings.SettingsViewModel
+import com.unraid.app.ui.shares.SharesScreen
+import com.unraid.app.ui.shares.SharesViewModel
 import com.unraid.app.ui.webview.DockerWebLauncherScreen
 import com.unraid.app.ui.webview.FullScreenDockerWebView
 import com.unraid.app.ui.webview.WebViewPoolManager
@@ -55,6 +60,7 @@ private enum class ActiveLaunchMode {
 @Composable
 fun MainScreen(
     dashboardViewModel: DashboardViewModel,
+    sharesViewModel: SharesViewModel,
     settingsViewModel: SettingsViewModel,
     preferencesRepository: AppPreferencesRepository,
     webViewPoolManager: WebViewPoolManager,
@@ -68,6 +74,7 @@ fun MainScreen(
     var activeServiceSnapshot by remember { mutableStateOf<LauncherService?>(null) }
 
     val dashboardUiState by dashboardViewModel.uiState.collectAsStateWithLifecycle()
+    val sharesUiState by sharesViewModel.uiState.collectAsStateWithLifecycle()
     val manualBookmarks by preferencesRepository.dockerServicesFlow
         .collectAsStateWithLifecycle(initialValue = emptyList())
     val pinnedAutoDockerIds by preferencesRepository.pinnedAutoDockerIdsFlow
@@ -347,6 +354,13 @@ fun MainScreen(
                         )
                     }
 
+                    AppDestination.SHARES -> {
+                        SharesScreen(
+                            viewModel = sharesViewModel,
+                            onNavigateToSettings = { currentTab = AppDestination.SETTINGS }
+                        )
+                    }
+
                     AppDestination.DOCKER_WEBVIEW -> {
                         DockerWebLauncherScreen(
                             launcherServices = launcherServices,
@@ -431,6 +445,23 @@ fun MainScreen(
                     }
                 }
             }
+        }
+    }
+
+    // 공유 탭에서 동영상 재생 시 전체 화면 가로 몰입 libmpv 플레이어 오버레이
+    val sharePlayRequest = sharesUiState.activePlayRequest
+    if (sharePlayRequest != null) {
+        PlayerImmersiveOrientationEffect()
+        key(sharePlayRequest.sessionId) {
+            NativeMpvPlayerScreen(
+                request = sharePlayRequest,
+                playerSettingsStore = playerSettingsStore,
+                onProgress = { _, _ -> },
+                onClosed = { _, _, _ ->
+                    sharesViewModel.closeVideoPlayer()
+                },
+                manageActivityOrientation = false
+            )
         }
     }
 }

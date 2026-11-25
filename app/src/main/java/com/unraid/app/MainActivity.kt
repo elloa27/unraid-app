@@ -10,6 +10,7 @@ import androidx.activity.viewModels
 import com.unraid.app.ui.MainScreen
 import com.unraid.app.ui.dashboard.DashboardViewModel
 import com.unraid.app.ui.settings.SettingsViewModel
+import com.unraid.app.ui.shares.SharesViewModel
 import com.unraid.app.ui.theme.UnraidHubTheme
 import com.unraid.app.ui.webview.WebViewPoolManager
 
@@ -34,12 +35,23 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private val sharesViewModel: SharesViewModel by viewModels {
+        SharesViewModel.Factory(
+            preferencesRepository = unraidApp.preferencesRepository,
+            credentialStore = unraidApp.secureCredentialStore,
+            graphQlClient = unraidApp.unraidGraphQlClient,
+            connectionManager = unraidApp.tailscaleConnectionManager,
+            smbClient = unraidApp.smbShareClient
+        )
+    }
+
     private val settingsViewModel: SettingsViewModel by viewModels {
         SettingsViewModel.Factory(
             preferencesRepository = unraidApp.preferencesRepository,
             credentialStore = unraidApp.secureCredentialStore,
             graphQlClient = unraidApp.unraidGraphQlClient,
-            connectionManager = unraidApp.tailscaleConnectionManager
+            connectionManager = unraidApp.tailscaleConnectionManager,
+            smbClient = unraidApp.smbShareClient
         )
     }
 
@@ -55,6 +67,7 @@ class MainActivity : ComponentActivity() {
             UnraidHubTheme {
                 MainScreen(
                     dashboardViewModel = dashboardViewModel,
+                    sharesViewModel = sharesViewModel,
                     settingsViewModel = settingsViewModel,
                     preferencesRepository = unraidApp.preferencesRepository,
                     webViewPoolManager = webViewPoolManager,

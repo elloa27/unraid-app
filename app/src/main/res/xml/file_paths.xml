@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 공유 탭 외부 앱 미리보기/열기용 임시 캐시 경로 -->
+    <cache-path
+        name="shared_preview"
+        path="shared_preview/" />
+</paths>

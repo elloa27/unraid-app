@@ -15,6 +15,8 @@ import com.unraid.app.data.remote.UnraidGraphQlClient
 import com.unraid.app.network.NetworkModule
 import com.unraid.app.network.TailscaleConnectionManager
 import com.unraid.app.network.WifiSsidReadResult
+import com.unraid.app.shares.SmbAuthConfig
+import com.unraid.app.shares.SmbShareClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -23,6 +25,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.net.URI
 
 data class ConnectionTestState(
     val isTesting: Boolean = false,
@@ -36,6 +39,11 @@ data class SettingsUiState(
     val homeWifiSsidInput: String = "",
     val tailscaleAuthKeyInput: String = "",
     val tailscaleServerUrlInput: String = "",
+    val smbUsernameInput: String = "",
+    val smbPasswordInput: String = "",
+    val smbUseGuest: Boolean = false,
+    val smbCustomHostInput: String = "",
+    val smbConnectionTest: ConnectionTestState = ConnectionTestState(),
     val connectionTest: ConnectionTestState = ConnectionTestState(),
     val feedbackMessage: String? = null
 )
@@ -44,13 +52,15 @@ data class SettingsUiState(
  * 설정 및 자체 에러 로그 화면 ViewModel.
  * - Unraid 서버 URL/API 키 저장, 자체 서명 SSL 허용, 연결 테스트
  * - Tailscale(tsnet) Auth Key, 홈 Wi-Fi SSID 자동 감지 및 연결 모드 설정
+ * - SMB 파일 공유 계정 설정 및 연결 테스트
  * - 도커 웹뷰 목록 수동 CRUD, 자체 에러 로그 관리
  */
 class SettingsViewModel(
     private val preferencesRepository: AppPreferencesRepository,
     private val credentialStore: SecureCredentialStore,
     private val graphQlClient: UnraidGraphQlClient,
-    private val connectionManager: TailscaleConnectionManager
+    private val connectionManager: TailscaleConnectionManager,
+    private val smbClient: SmbShareClient
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -88,14 +98,31 @@ class SettingsViewModel(
             val savedHomeSsid = preferencesRepository.homeWifiSsidFlow.first()
             val savedTsKey = credentialStore.getTailscaleAuthKey()
             val savedTsUrl = preferencesRepository.tailscaleServerUrlFlow.first()
+            val savedSmb = credentialStore.getSmbCredentials()
             _uiState.update {
                 it.copy(
                     serverUrlInput = savedUrl,
                     apiKeyInput = savedKey,
                     homeWifiSsidInput = savedHomeSsid,
                     tailscaleAuthKeyInput = savedTsKey,
-                    tailscaleServerUrlInput = savedTsUrl
+                    tailscaleServerUrlInput = savedTsUrl,
+                    smbUsernameInput = savedSmb.username,
+                    smbPasswordInput = savedSmb.password,
+                    smbUseGuest = savedSmb.useGuest,
+                    smbCustomHostInput = savedSmb.customHost
                 )
+            }
+        }
+        viewModelScope.launch {
+            credentialStore.smbCredentialsFlow.collect { creds ->
+                _uiState.update {
+                    it.copy(
+                        smbUsernameInput = creds.username,
+                        smbPasswordInput = creds.password,
+                        smbUseGuest = creds.useGuest,
+                        smbCustomHostInput = creds.customHost
+                    )
+                }
             }
         }
     }
@@ -128,6 +155,102 @@ class SettingsViewModel(
 
     fun onTailscaleServerUrlChanged(value: String) {
         _uiState.update { it.copy(tailscaleServerUrlInput = value) }
+    }
+
+    fun onSmbUsernameChanged(value: String) {
+        _uiState.update { it.copy(smbUsernameInput = value, smbConnectionTest = ConnectionTestState()) }
+    }
+
+    fun onSmbPasswordChanged(value: String) {
+        _uiState.update { it.copy(smbPasswordInput = value, smbConnectionTest = ConnectionTestState()) }
+    }
+
+    fun onSmbUseGuestChanged(enabled: Boolean) {
+        _uiState.update { it.copy(smbUseGuest = enabled, smbConnectionTest = ConnectionTestState()) }
+    }
+
+    fun onSmbCustomHostChanged(value: String) {
+        _uiState.update { it.copy(smbCustomHostInput = value, smbConnectionTest = ConnectionTestState()) }
+    }
+
+    fun saveSmbSettings() {
+        val state = _uiState.value
+        credentialStore.saveSmbCredentials(
+            username = state.smbUsernameInput,
+            password = state.smbPasswordInput,
+            useGuest = state.smbUseGuest,
+            customHost = state.smbCustomHostInput
+        )
+        _uiState.update {
+            it.copy(feedbackMessage = "SMB 계정 설정이 암호화되어 저장되었습니다.")
+        }
+    }
+
+    fun testSmbConnection() {
+        val state = _uiState.value
+        val effectiveUrl = resolveEffectiveUnraidUrl(
+            homeUrl = state.serverUrlInput.trim(),
+            tailscaleUrl = state.tailscaleServerUrlInput.trim(),
+            useTailscale = connectionStatus.value.isUsingTailscale
+        )
+        val autoHost = runCatching {
+            URI(AppPreferencesRepository.normalizeUrl(effectiveUrl)).host.orEmpty()
+        }.getOrDefault("")
+        val targetHost = state.smbCustomHostInput.trim().ifBlank { autoHost }
+
+        if (targetHost.isBlank()) {
+            _uiState.update {
+                it.copy(
+                    smbConnectionTest = ConnectionTestState(
+                        isTesting = false,
+                        isSuccess = false,
+                        message = "Unraid 서버 URL 또는 SMB 호스트를 먼저 입력해 주세요."
+                    )
+                )
+            }
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    smbConnectionTest = ConnectionTestState(
+                        isTesting = true,
+                        isSuccess = null,
+                        message = "SMB 연결 테스트 중... ($targetHost:445)"
+                    )
+                )
+            }
+            val result = smbClient.testConnection(
+                host = targetHost,
+                auth = SmbAuthConfig(
+                    username = state.smbUsernameInput.trim(),
+                    password = state.smbPasswordInput,
+                    useGuest = state.smbUseGuest
+                )
+            )
+            result.onSuccess { msg ->
+                _uiState.update {
+                    it.copy(
+                        smbConnectionTest = ConnectionTestState(
+                            isTesting = false,
+                            isSuccess = true,
+                            message = msg
+                        )
+                    )
+                }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        smbConnectionTest = ConnectionTestState(
+                            isTesting = false,
+                            isSuccess = false,
+                            message = err.localizedMessage ?: "SMB 연결에 실패했습니다."
+                        )
+                    )
+                }
+            }
+        }
     }
 
     fun onAllowSelfSignedSslChanged(enabled: Boolean) {
@@ -361,7 +484,8 @@ class SettingsViewModel(
         private val preferencesRepository: AppPreferencesRepository,
         private val credentialStore: SecureCredentialStore,
         private val graphQlClient: UnraidGraphQlClient,
-        private val connectionManager: TailscaleConnectionManager
+        private val connectionManager: TailscaleConnectionManager,
+        private val smbClient: SmbShareClient
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -369,7 +493,8 @@ class SettingsViewModel(
                 preferencesRepository,
                 credentialStore,
                 graphQlClient,
-                connectionManager
+                connectionManager,
+                smbClient
             ) as T
         }
     }

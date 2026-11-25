@@ -490,8 +490,15 @@ fun NativeMpvPlayerScreen(
             mpv.setOptionString("network-timeout", "30")
 
             // 내장 Tailscale(tsnet) 로컬 프록시 자동 브릿지
+            // 단, 로컬 SMB 스트림 서버(127.0.0.1 / localhost) URL은 외부 Tailscale 활성 상태에서도 프록시 우회 직결
             val proxyConfig = NetworkProxyManager.proxyConfig.value
-            if (proxyConfig.isActive) {
+            val isLoopbackStream = runCatching {
+                val host = java.net.URI(request.url).host.orEmpty()
+                host.equals("127.0.0.1", ignoreCase = true) ||
+                    host.equals("localhost", ignoreCase = true) ||
+                    host == "::1"
+            }.getOrDefault(false)
+            if (proxyConfig.isActive && !isLoopbackStream) {
                 mpv.setOptionString("http-proxy", "http://${proxyConfig.host}:${proxyConfig.port}")
             } else {
                 mpv.setOptionString("http-proxy", "")

@@ -92,6 +92,13 @@ class AppPreferencesRepository(private val context: Context) {
     }
 
     /**
+     * 사용자가 공유 드라이브 탭에 수동으로 추가한 SMB 공유 폴더 이름 목록
+     */
+    val manualShareNamesFlow: Flow<Set<String>> = context.appDataStore.data.map { prefs ->
+        prefs[KEY_MANUAL_SHARE_NAMES] ?: emptySet()
+    }
+
+    /**
      * 자동 감지 도커 항목의 커스텀 이름/URL/네이티브 UI 선호 설정 맵
      */
     val autoDockerOverridesFlow: Flow<Map<String, AutoDockerOverride>> = context.appDataStore.data.map { prefs ->
@@ -121,6 +128,23 @@ class AppPreferencesRepository(private val context: Context) {
             } else {
                 current - serviceId
             }
+        }
+    }
+
+    suspend fun addManualShareName(shareName: String) {
+        val clean = shareName.trim().trim('/', '\\')
+        if (clean.isBlank()) return
+        context.appDataStore.edit { prefs ->
+            val current = prefs[KEY_MANUAL_SHARE_NAMES] ?: emptySet()
+            prefs[KEY_MANUAL_SHARE_NAMES] = current + clean
+        }
+    }
+
+    suspend fun removeManualShareName(shareName: String) {
+        val clean = shareName.trim().trim('/', '\\')
+        context.appDataStore.edit { prefs ->
+            val current = prefs[KEY_MANUAL_SHARE_NAMES] ?: emptySet()
+            prefs[KEY_MANUAL_SHARE_NAMES] = current - clean
         }
     }
 
@@ -234,6 +258,7 @@ class AppPreferencesRepository(private val context: Context) {
         private val KEY_HOME_WIFI_SSID = stringPreferencesKey("home_wifi_ssid")
         private val KEY_TAILSCALE_SERVER_URL = stringPreferencesKey("tailscale_server_url")
         private val KEY_PINNED_AUTO_DOCKER_IDS = stringSetPreferencesKey("pinned_auto_docker_ids")
+        private val KEY_MANUAL_SHARE_NAMES = stringSetPreferencesKey("manual_smb_share_names")
         private val KEY_AUTO_DOCKER_OVERRIDES_JSON = stringPreferencesKey("auto_docker_overrides_json")
 
         /**

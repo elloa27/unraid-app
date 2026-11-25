@@ -13,6 +13,7 @@ import com.unraid.app.network.TailscaleConnectionManager
 import com.unraid.app.player.PlayerSettingsStore
 import com.unraid.app.plugin.ExternalPluginManager
 import com.unraid.app.plugin.PluginStorageVault
+import com.unraid.app.shares.SmbShareClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -49,6 +50,9 @@ class UnraidApp : Application(), ImageLoaderFactory {
     lateinit var playerSettingsStore: PlayerSettingsStore
         private set
 
+    lateinit var smbShareClient: SmbShareClient
+        private set
+
     override fun onCreate() {
         super.onCreate()
         // 전역 에러 로거 및 미처리 예외 핸들러 최우선 초기화
@@ -57,6 +61,7 @@ class UnraidApp : Application(), ImageLoaderFactory {
         preferencesRepository = AppPreferencesRepository(this)
         secureCredentialStore = SecureCredentialStore(this)
         unraidGraphQlClient = UnraidGraphQlClient { NetworkModule.okHttpClient }
+        smbShareClient = SmbShareClient()
         pluginStorageVault = PluginStorageVault(this)
         externalPluginManager = ExternalPluginManager(
             context = this,
