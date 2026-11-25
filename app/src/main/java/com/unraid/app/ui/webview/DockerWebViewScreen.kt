@@ -140,22 +140,27 @@ fun FullScreenDockerWebView(
     onNavigateToDashboard: () -> Unit,
     onNavigateToLauncher: () -> Unit,
     onNavigateToSettings: () -> Unit,
+    onExitWhenNoHistory: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val metaMap by webViewPoolManager.metaByServiceId.collectAsStateWithLifecycle()
     val cachedIds by webViewPoolManager.cachedServiceIds.collectAsStateWithLifecycle()
     val activeMeta = metaMap[activeService.id] ?: WebViewUiMeta()
     val matchingPlugin = remember(activeService, installedPlugins) {
-        installedPlugins.firstOrNull { it.matches(activeService) }
+        if (activeService.id == WebViewPoolManager.UNRAID_WEBGUI_SERVICE_ID) {
+            null
+        } else {
+            installedPlugins.firstOrNull { it.matches(activeService) }
+        }
     }
 
     var showQuickMenu by remember { mutableStateOf(false) }
 
-    // 뒤로가기 버튼: 웹뷰 내 이전 페이지가 있으면 우선 뒤로가기, 최상단이면 런처로 안전 복귀 (웹뷰 캐시는 유지)
+    // 뒤로가기 버튼: 웹뷰 내 이전 페이지가 있으면 우선 뒤로가기, 최상단이면 지정된 화면(기본 런처)으로 안전 복귀
     BackHandler(enabled = true) {
         val wentBack = webViewPoolManager.goBack(activeService.id)
         if (!wentBack) {
-            onNavigateToLauncher()
+            (onExitWhenNoHistory ?: onNavigateToLauncher)()
         }
     }
 

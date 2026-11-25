@@ -176,6 +176,36 @@ fun MainScreen(
         }
     }
 
+    val openUnraidWebUi: (String) -> Unit = { rawPath ->
+        val rawBase = dashboardUiState.serverUrl.trim().trimEnd('/')
+        val cleanBase = if (rawBase.endsWith("/graphql", ignoreCase = true)) {
+            rawBase.dropLast("/graphql".length).trimEnd('/')
+        } else {
+            rawBase
+        }
+        if (cleanBase.isNotBlank()) {
+            val normalizedPath = rawPath.trim().let { p ->
+                when {
+                    p.isBlank() -> "/Main"
+                    p.startsWith("/") -> p
+                    else -> "/$p"
+                }
+            }
+            val fullUrl = "$cleanBase$normalizedPath"
+            val unraidWebService = LauncherService(
+                id = WebViewPoolManager.UNRAID_WEBGUI_SERVICE_ID,
+                name = "Unraid 웹 UI",
+                url = fullUrl,
+                source = WebServiceSource.MANUAL,
+                isRunning = true,
+                preferNativeUi = false
+            )
+            activeServiceSnapshot = unraidWebService
+            activeSessionServiceId = unraidWebService.id
+            activeLaunchMode = ActiveLaunchMode.WEBVIEW
+        }
+    }
+
     val activeSessionService = remember(activeSessionServiceId, launcherServices, activeServiceSnapshot) {
         val targetId = activeSessionServiceId ?: return@remember null
         launcherServices.firstOrNull { it.id == targetId }
@@ -191,8 +221,9 @@ fun MainScreen(
     }
 
     if (activeSessionService != null) {
-        val matchingPlugin: InstalledPlugin? = remember(activeSessionService, installedPlugins) {
-            installedPlugins.firstOrNull { it.matches(activeSessionService) }
+        val isUnraidWebGui = activeSessionService.id == WebViewPoolManager.UNRAID_WEBGUI_SERVICE_ID
+        val matchingPlugin: InstalledPlugin? = remember(activeSessionService, installedPlugins, isUnraidWebGui) {
+            if (isUnraidWebGui) null else installedPlugins.firstOrNull { it.matches(activeSessionService) }
         }
 
         if (activeLaunchMode == ActiveLaunchMode.EXTERNAL_PLUGIN && matchingPlugin != null) {
@@ -234,6 +265,14 @@ fun MainScreen(
                 onNavigateToSettings = {
                     activeSessionServiceId = null
                     currentTab = AppDestination.SETTINGS
+                },
+                onExitWhenNoHistory = if (isUnraidWebGui) {
+                    {
+                        activeSessionServiceId = null
+                        currentTab = AppDestination.DASHBOARD
+                    }
+                } else {
+                    null
                 }
             )
         } else {
@@ -260,6 +299,14 @@ fun MainScreen(
                 onNavigateToSettings = {
                     activeSessionServiceId = null
                     currentTab = AppDestination.SETTINGS
+                },
+                onExitWhenNoHistory = if (isUnraidWebGui) {
+                    {
+                        activeSessionServiceId = null
+                        currentTab = AppDestination.DASHBOARD
+                    }
+                } else {
+                    null
                 }
             )
         }
@@ -303,7 +350,8 @@ fun MainScreen(
                         DashboardScreen(
                             viewModel = dashboardViewModel,
                             onNavigateToSettings = { currentTab = AppDestination.SETTINGS },
-                            onOpenDockerWebUi = openContainerFromDashboard
+                            onOpenDockerWebUi = openContainerFromDashboard,
+                            onOpenUnraidWebUi = openUnraidWebUi
                         )
                     }
 

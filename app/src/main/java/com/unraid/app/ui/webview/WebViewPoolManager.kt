@@ -64,6 +64,8 @@ class WebViewPoolManager {
             return existing.webView
         }
 
+        val isUnraidWebGui = service.id == UNRAID_WEBGUI_SERVICE_ID
+
         val webView = WebView(context).apply {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -85,6 +87,14 @@ class WebViewPoolManager {
                 mediaPlaybackRequiresUserGesture = false
                 mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                 cacheMode = WebSettings.LOAD_DEFAULT
+                if (isUnraidWebGui) {
+                    // PC 전용 Unraid Dynamix 웹 UI를 모바일 화면 너비에 맞춰 축소 표시하고 핀치 줌 지원
+                    userAgentString = userAgentString.replace("Mobile", "")
+                }
+            }
+
+            if (isUnraidWebGui) {
+                setInitialScale(0)
             }
 
             // 쿠키 및 서드파티 쿠키 활성화
@@ -232,5 +242,12 @@ class WebViewPoolManager {
         val currentMap = _metaByServiceId.value
         val updated = transform(currentMap[serviceId] ?: WebViewUiMeta())
         _metaByServiceId.value = currentMap + (serviceId to updated)
+    }
+
+    companion object {
+        /**
+         * Unraid 공식 웹 UI(Dynamix) 비상 바로가기 전용 고정 캐시 ID
+         */
+        const val UNRAID_WEBGUI_SERVICE_ID = "unraid_webgui"
     }
 }
