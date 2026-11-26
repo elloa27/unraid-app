@@ -135,6 +135,14 @@ class SharesViewModel(
     private var lastAutoLoadedSignature: String = ""
 
     private var activeTransferJob: Job? = null
+    private var directoryLoadJob: Job? = null
+
+    // 폴더 탐색 시 즉시 화면을 표시하기 위한 인메모리 디렉터리 캐시 (Stale-While-Revalidate)
+    private val directoryCache = object : LinkedHashMap<String, List<SmbFileEntry>>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<SmbFileEntry>>?): Boolean {
+            return size > MAX_DIRECTORY_CACHE_ENTRIES
+        }
+    }
 
     init {
         viewModelScope.launch {
@@ -177,10 +185,18 @@ class SharesViewModel(
                 }
 
                 val routeReady = snap.connStatus.phase != RoutePhase.TAILSCALE_CONNECTING
-                val signature = "${snap.effectiveUrl}|${snap.apiKey}|$resolvedHost|${snap.connStatus.phase}|${snap.connStatus.proxyPort}"
-                if (routeReady && lastAutoLoadedSignature != signature && (apiConfigured || manuals.isNotEmpty())) {
+                val signature = "${snap.effectiveUrl}|${snap.apiKey}|$resolvedHost|${snap.connStatus.phase}|${snap.connStatus.proxyPort}|${snap.smbCreds.username}|${snap.smbCreds.useGuest}"
+                if (routeReady && lastAutoLoadedSignature != signature && (apiConfigured || manuals.isNotEmpty() || resolvedHost.isNotBlank())) {
                     lastAutoLoadedSignature = signature
-                    loadRootShares(isPullToRefresh = false)
+                    directoryCache.clear()
+                    if (apiConfigured || manuals.isNotEmpty()) {
+                        loadRootShares(isPullToRefresh = false)
+                    }
+                    if (resolvedHost.isNotBlank() && snap.smbCreds.isConfigured) {
+                        viewModelScope.launch {
+                            smbClient.warmupSession(resolvedHost, SmbAuthConfig.fromCredentials(snap.smbCreds))
+                        }
+                    }
                 }
             }
         }
@@ -262,38 +278,58 @@ class SharesViewModel(
             }
             return
         }
+        val cached = directoryCache[cacheKey(shareName, "")]
         _uiState.update {
             it.copy(
                 currentShare = shareName,
                 currentPath = "",
-                entries = emptyList(),
+                entries = cached.orEmpty(),
+                isLoading = cached == null,
+                isRefreshing = false,
                 errorMessage = null,
                 searchQuery = "",
                 isSearchVisible = false
             )
         }
-        loadDirectory(shareName = shareName, relativePath = "", isPullToRefresh = false)
+        loadDirectory(
+            shareName = shareName,
+            relativePath = "",
+            isPullToRefresh = false,
+            hasCachedEntries = cached != null
+        )
     }
 
     fun openDirectory(entry: SmbFileEntry) {
         val shareName = _uiState.value.currentShare ?: return
         if (!entry.isDirectory) return
+        val cached = directoryCache[cacheKey(shareName, entry.relativePath)]
         _uiState.update {
             it.copy(
                 currentPath = entry.relativePath,
+                entries = cached.orEmpty(),
+                isLoading = cached == null,
+                isRefreshing = false,
                 errorMessage = null,
                 searchQuery = ""
             )
         }
-        loadDirectory(shareName = shareName, relativePath = entry.relativePath, isPullToRefresh = false)
+        loadDirectory(
+            shareName = shareName,
+            relativePath = entry.relativePath,
+            isPullToRefresh = false,
+            hasCachedEntries = cached != null
+        )
     }
 
     fun navigateToRoot() {
+        directoryLoadJob?.cancel()
         _uiState.update {
             it.copy(
                 currentShare = null,
                 currentPath = "",
                 entries = emptyList(),
+                isLoading = false,
+                isRefreshing = false,
                 errorMessage = null,
                 searchQuery = "",
                 isSearchVisible = false
@@ -313,8 +349,23 @@ class SharesViewModel(
         } else {
             segments.take(depthIndex).joinToString("/")
         }
-        _uiState.update { it.copy(currentPath = targetPath, errorMessage = null, searchQuery = "") }
-        loadDirectory(shareName = shareName, relativePath = targetPath, isPullToRefresh = false)
+        val cached = directoryCache[cacheKey(shareName, targetPath)]
+        _uiState.update {
+            it.copy(
+                currentPath = targetPath,
+                entries = cached.orEmpty(),
+                isLoading = cached == null,
+                isRefreshing = false,
+                errorMessage = null,
+                searchQuery = ""
+            )
+        }
+        loadDirectory(
+            shareName = shareName,
+            relativePath = targetPath,
+            isPullToRefresh = false,
+            hasCachedEntries = cached != null
+        )
     }
 
     fun navigateUp(): Boolean {
@@ -325,43 +376,88 @@ class SharesViewModel(
             return true
         }
         val parentPath = state.currentPath.substringBeforeLast('/', "")
-        _uiState.update { it.copy(currentPath = parentPath, errorMessage = null, searchQuery = "") }
-        loadDirectory(shareName = shareName, relativePath = parentPath, isPullToRefresh = false)
+        val cached = directoryCache[cacheKey(shareName, parentPath)]
+        _uiState.update {
+            it.copy(
+                currentPath = parentPath,
+                entries = cached.orEmpty(),
+                isLoading = cached == null,
+                isRefreshing = false,
+                errorMessage = null,
+                searchQuery = ""
+            )
+        }
+        loadDirectory(
+            shareName = shareName,
+            relativePath = parentPath,
+            isPullToRefresh = false,
+            hasCachedEntries = cached != null
+        )
         return true
     }
 
-    private fun loadDirectory(shareName: String, relativePath: String, isPullToRefresh: Boolean) {
+    private fun loadDirectory(
+        shareName: String,
+        relativePath: String,
+        isPullToRefresh: Boolean,
+        hasCachedEntries: Boolean = false
+    ) {
         val host = currentEffectiveHost
         val auth = SmbAuthConfig.fromCredentials(currentSmbCreds)
-        viewModelScope.launch {
+        directoryLoadJob?.cancel()
+        directoryLoadJob = viewModelScope.launch {
             _uiState.update {
                 it.copy(
-                    isLoading = !isPullToRefresh,
+                    isLoading = !isPullToRefresh && !hasCachedEntries,
                     isRefreshing = isPullToRefresh,
                     errorMessage = null
                 )
             }
 
-            smbClient.listDirectory(host, auth, shareName, relativePath)
-                .onSuccess { list ->
-                    _uiState.update {
-                        it.copy(
-                            entries = list,
-                            isLoading = false,
-                            isRefreshing = false,
-                            errorMessage = null
-                        )
-                    }
+            val result = smbClient.listDirectory(host, auth, shareName, relativePath)
+            // 사용자가 이미 다른 폴더로 이동한 경우 늦게 도착한 응답은 무시
+            val latest = _uiState.value
+            if (latest.currentShare != shareName || latest.currentPath != relativePath) {
+                return@launch
+            }
+
+            result.onSuccess { list ->
+                directoryCache[cacheKey(shareName, relativePath)] = list
+                _uiState.update {
+                    it.copy(
+                        entries = list,
+                        isLoading = false,
+                        isRefreshing = false,
+                        errorMessage = null
+                    )
                 }
-                .onFailure { err ->
-                    _uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            isRefreshing = false,
-                            errorMessage = err.localizedMessage ?: "SMB 폴더를 열 수 없습니다. 계정 정보와 네트워크 연결을 확인해 주세요."
-                        )
-                    }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        isRefreshing = false,
+                        errorMessage = err.localizedMessage ?: "SMB 폴더를 열 수 없습니다. 계정 정보와 네트워크 연결을 확인해 주세요."
+                    )
                 }
+            }
+        }
+    }
+
+    private fun cacheKey(shareName: String, relativePath: String): String {
+        return "$currentEffectiveHost|$shareName|${SmbShareClient.normalizeRelativePath(relativePath)}"
+    }
+
+    private fun invalidateDirectoryCache(
+        shareName: String,
+        parentRelativePath: String,
+        removedSubtreePath: String? = null
+    ) {
+        directoryCache.remove(cacheKey(shareName, parentRelativePath))
+        if (!removedSubtreePath.isNullOrBlank()) {
+            val normSubtree = SmbShareClient.normalizeRelativePath(removedSubtreePath)
+            val exactKey = "$currentEffectiveHost|$shareName|$normSubtree"
+            val prefix = "$exactKey/"
+            directoryCache.keys.removeAll { it == exactKey || it.startsWith(prefix) }
         }
     }
 
@@ -427,6 +523,10 @@ class SharesViewModel(
             useGuest = useGuest,
             customHost = customHost
         )
+        directoryCache.clear()
+        viewModelScope.launch(Dispatchers.IO) {
+            smbClient.closePooledConnections()
+        }
         _uiState.update {
             it.copy(
                 smbTestState = SmbTestResultState(),
@@ -517,6 +617,7 @@ class SharesViewModel(
                 parentRelativePath = state.currentPath,
                 newFolderName = folderName
             ).onSuccess {
+                invalidateDirectoryCache(shareName, state.currentPath)
                 _uiState.update { it.copy(feedbackMessage = "'$folderName' 폴더를 생성했습니다.") }
                 loadDirectory(shareName, state.currentPath, isPullToRefresh = true)
             }.onFailure { err ->
@@ -539,6 +640,11 @@ class SharesViewModel(
                 entry = entry,
                 newName = newName
             ).onSuccess {
+                invalidateDirectoryCache(
+                    shareName = shareName,
+                    parentRelativePath = state.currentPath,
+                    removedSubtreePath = if (entry.isDirectory) entry.relativePath else null
+                )
                 _uiState.update { it.copy(feedbackMessage = "'${entry.name}'의 이름을 '$newName'(으)로 변경했습니다.") }
                 loadDirectory(shareName, state.currentPath, isPullToRefresh = true)
             }.onFailure { err ->
@@ -561,6 +667,11 @@ class SharesViewModel(
                 entry = entry,
                 recursive = true
             ).onSuccess {
+                invalidateDirectoryCache(
+                    shareName = shareName,
+                    parentRelativePath = state.currentPath,
+                    removedSubtreePath = if (entry.isDirectory) entry.relativePath else null
+                )
                 _uiState.update { it.copy(feedbackMessage = "'${entry.name}'을(를) 삭제했습니다.") }
                 loadDirectory(shareName, state.currentPath, isPullToRefresh = true)
             }.onFailure { err ->
@@ -650,6 +761,7 @@ class SharesViewModel(
                     )
                 }
                 if (successCount > 0) {
+                    invalidateDirectoryCache(shareName, targetPath)
                     loadDirectory(shareName, targetPath, isPullToRefresh = true)
                 }
             } catch (_: CancellationException) {
@@ -1046,8 +1158,10 @@ class SharesViewModel(
     }
 
     override fun onCleared() {
+        directoryLoadJob?.cancel()
         activeTransferJob?.cancel()
         streamServer.stop()
+        smbClient.closePooledConnections()
         super.onCleared()
     }
 
@@ -1141,5 +1255,6 @@ class SharesViewModel(
     companion object {
         private const val MAX_IMAGE_PREVIEW_BYTES = 20 * 1024 * 1024
         private const val MAX_TEXT_PREVIEW_BYTES = 1 * 1024 * 1024
+        private const val MAX_DIRECTORY_CACHE_ENTRIES = 80
     }
 }

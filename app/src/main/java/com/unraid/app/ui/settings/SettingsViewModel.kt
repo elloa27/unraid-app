@@ -17,6 +17,7 @@ import com.unraid.app.network.TailscaleConnectionManager
 import com.unraid.app.network.WifiSsidReadResult
 import com.unraid.app.shares.SmbAuthConfig
 import com.unraid.app.shares.SmbShareClient
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -181,6 +182,9 @@ class SettingsViewModel(
             useGuest = state.smbUseGuest,
             customHost = state.smbCustomHostInput
         )
+        viewModelScope.launch(Dispatchers.IO) {
+            smbClient.closePooledConnections()
+        }
         _uiState.update {
             it.copy(feedbackMessage = "SMB 계정 설정이 암호화되어 저장되었습니다.")
         }

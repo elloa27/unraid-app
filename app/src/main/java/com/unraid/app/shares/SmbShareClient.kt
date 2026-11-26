@@ -7,6 +7,8 @@ import com.hierynomus.mssmb2.SMB2ShareAccess
 import com.hierynomus.protocol.commons.EnumWithValue
 import com.hierynomus.smbj.SMBClient
 import com.hierynomus.smbj.SmbConfig
+import com.hierynomus.smbj.connection.Connection
+import com.hierynomus.smbj.session.Session
 import com.hierynomus.smbj.share.DiskShare
 import com.unraid.app.data.local.AppErrorLogger
 import com.unraid.app.network.NetworkProxyManager
@@ -22,12 +24,46 @@ import java.util.concurrent.TimeUnit
 
 /**
  * SMBJ 기반 Unraid SMB2/SMB3 파일 탐색·관리 클라이언트.
- * - TsnetAwareSocketFactory를 통해 홈 Wi-Fi 직결 및 내장 Tailscale(tsnet) 프록시를 자동 전환합니다.
- * - 모든 연산은 Dispatchers.IO에서 실행되며 Connection/Session/DiskShare/File 리소스를 안전하게 닫습니다.
+ * - 탐색·폴더 관리 연산(list/mkdir/rename/delete/소형 미리보기)은 SMBClient·Connection·Session·DiskShare를
+ *   재사용하는 연결 풀을 사용해 폴더 진입마다 발생하던 TCP/NTLM/TreeConnect 지연(한 템포 딜레이)을 제거합니다.
+ * - 네트워크 경로(홈 Wi-Fi ↔ Tailscale 프록시 포트), 호스트, 인증 정보가 바뀌거나 유휴 연결이 끊어지면
+ *   자동으로 기존 풀을 폐기하고 1회 투명 재연결합니다.
+ * - 대용량 업로드/다운로드/동영상 스트리밍은 탐색 풀을 블로킹하지 않도록 독립 연결을 사용합니다.
  */
 class SmbShareClient(
     private val socketFactory: TsnetAwareSocketFactory = TsnetAwareSocketFactory()
 ) {
+
+    private data class PoolKey(
+        val host: String,
+        val username: String,
+        val passwordHash: Int,
+        val useGuest: Boolean,
+        val proxySignature: String
+    )
+
+    private class PooledSmbContext(
+        val key: PoolKey,
+        val client: SMBClient,
+        val connection: Connection,
+        val session: Session,
+        val shares: MutableMap<String, DiskShare> = LinkedHashMap()
+    ) {
+        fun isHealthy(): Boolean {
+            return runCatching { connection.isConnected }.getOrDefault(false)
+        }
+
+        fun closeQuietly() {
+            shares.values.forEach { share -> runCatching { share.close() } }
+            shares.clear()
+            runCatching { session.close() }
+            runCatching { connection.close() }
+            runCatching { client.close() }
+        }
+    }
+
+    private val poolLock = Any()
+    private var pooledContext: PooledSmbContext? = null
 
     internal fun buildSmbConfig(): SmbConfig {
         return SmbConfig.builder()
@@ -39,7 +75,48 @@ class SmbShareClient(
     }
 
     /**
-     * SMB 연결 및 인증 테스트 (sampleShareName이 지정되면 해당 공유 마운트까지 검증)
+     * 디렉터리 탐색/메타 연산 풀용 설정.
+     * 모바일 망 전환 등으로 유휴 소켓이 반열림(half-open) 상태가 됐을 때 길게 멈추지 않고
+     * 빠르게 실패 → 자동 재연결할 수 있도록 짧은 타임아웃을 사용합니다.
+     */
+    private fun buildInteractiveSmbConfig(): SmbConfig {
+        return SmbConfig.builder()
+            .withSocketFactory(socketFactory)
+            .withTimeout(15, TimeUnit.SECONDS)
+            .withSoTimeout(25, TimeUnit.SECONDS)
+            .withMultiProtocolNegotiate(true)
+            .build()
+    }
+
+    /**
+     * 루트 공유 목록 화면 진입 시 백그라운드에서 SMB TCP·NTLM 세션을 미리 워밍업합니다.
+     * 첫 번째 공유 폴더를 탭할 때 발생하는 초기 핸드셰이크 대기 시간을 없앱니다.
+     */
+    suspend fun warmupSession(
+        host: String,
+        auth: SmbAuthConfig
+    ) = withContext(Dispatchers.IO) {
+        val cleanHost = host.trim()
+        if (cleanHost.isBlank()) return@withContext
+        runCatching {
+            synchronized(poolLock) {
+                ensurePooledContextLocked(cleanHost, auth)
+            }
+        }
+    }
+
+    /**
+     * 보관 중인 SMB 탐색 연결 풀을 즉시 정리합니다. (계정 변경, 앱 종료 시 호출)
+     */
+    fun closePooledConnections() {
+        synchronized(poolLock) {
+            pooledContext?.closeQuietly()
+            pooledContext = null
+        }
+    }
+
+    /**
+     * SMB 연결 및 인증 테스트 (독립 연결로 실제 신규 핸드셰이크를 검증)
      */
     suspend fun testConnection(
         host: String,
@@ -72,7 +149,7 @@ class SmbShareClient(
     }
 
     /**
-     * 지정 공유 폴더/하위 경로의 파일 및 디렉터리 목록을 조회합니다.
+     * 지정 공유 폴더/하위 경로의 파일 및 디렉터리 목록을 조회합니다. (연결 풀 재사용으로 즉시 응답)
      */
     suspend fun listDirectory(
         host: String,
@@ -85,7 +162,7 @@ class SmbShareClient(
         val smbPath = toSmbPath(normPath)
 
         runCatching {
-            withDiskShare(cleanHost, auth, shareName) { share ->
+            withPooledDiskShare(cleanHost, auth, shareName) { share ->
                 share.list(smbPath)
                     .asSequence()
                     .filter { info ->
@@ -137,7 +214,7 @@ class SmbShareClient(
         val smbPath = toSmbPath(targetRelative)
 
         runCatching {
-            withDiskShare(host.trim(), auth, shareName) { share ->
+            withPooledDiskShare(host.trim(), auth, shareName) { share ->
                 if (share.folderExists(smbPath)) {
                     throw IllegalStateException("같은 이름의 폴더가 이미 존재합니다: $cleanName")
                 }
@@ -169,7 +246,7 @@ class SmbShareClient(
         val newSmbPath = toSmbPath(newNorm)
 
         runCatching {
-            withDiskShare(host.trim(), auth, shareName) { share ->
+            withPooledDiskShare(host.trim(), auth, shareName) { share ->
                 val access = EnumSet.of(AccessMask.DELETE, AccessMask.GENERIC_WRITE)
                 if (entry.isDirectory) {
                     share.openDirectory(
@@ -214,7 +291,7 @@ class SmbShareClient(
         val smbPath = toSmbPath(normPath)
 
         runCatching {
-            withDiskShare(host.trim(), auth, shareName) { share ->
+            withPooledDiskShare(host.trim(), auth, shareName) { share ->
                 if (entry.isDirectory) {
                     share.rmdir(smbPath, recursive)
                 } else {
@@ -227,7 +304,7 @@ class SmbShareClient(
     }
 
     /**
-     * SMB 파일을 지정 OutputStream으로 청크 스트리밍 다운로드합니다.
+     * SMB 파일을 지정 OutputStream으로 청크 스트리밍 다운로드합니다. (독립 연결 사용)
      */
     suspend fun downloadToStream(
         host: String,
@@ -241,7 +318,7 @@ class SmbShareClient(
         val smbPath = toSmbPath(normPath)
 
         runCatching {
-            withDiskShare(host.trim(), auth, shareName) { share ->
+            withDedicatedDiskShare(host.trim(), auth, shareName) { share ->
                 share.openFile(
                     smbPath,
                     EnumSet.of(AccessMask.GENERIC_READ),
@@ -284,7 +361,7 @@ class SmbShareClient(
     }
 
     /**
-     * 로컬 InputStream 데이터를 SMB 공유 폴더에 스트림 업로드합니다.
+     * 로컬 InputStream 데이터를 SMB 공유 폴더에 스트림 업로드합니다. (독립 연결 사용)
      */
     suspend fun uploadFromStream(
         host: String,
@@ -302,7 +379,7 @@ class SmbShareClient(
         val smbPath = toSmbPath(targetRelative)
 
         runCatching {
-            withDiskShare(host.trim(), auth, shareName) { share ->
+            withDedicatedDiskShare(host.trim(), auth, shareName) { share ->
                 share.openFile(
                     smbPath,
                     EnumSet.of(AccessMask.GENERIC_WRITE),
@@ -342,6 +419,7 @@ class SmbShareClient(
 
     /**
      * 인앱 이미지/텍스트/자막 미리보기용으로 최대 maxBytes 한도 내에서 안전하게 바이트를 읽어옵니다.
+     * (연결 풀 재사용으로 이미지/텍스트 열기 속도 향상)
      */
     suspend fun readSmallFileBytes(
         host: String,
@@ -354,7 +432,7 @@ class SmbShareClient(
         val smbPath = toSmbPath(normPath)
 
         runCatching {
-            withDiskShare(host.trim(), auth, shareName) { share ->
+            withPooledDiskShare(host.trim(), auth, shareName) { share ->
                 share.openFile(
                     smbPath,
                     EnumSet.of(AccessMask.GENERIC_READ),
@@ -374,7 +452,6 @@ class SmbShareClient(
                     val buffer = ByteArray(64 * 1024)
                     smbFile.inputStream.use { input ->
                         while (true) {
-                            currentCoroutineContext().ensureActive()
                             val read = input.read(buffer)
                             if (read <= 0) break
                             if (out.size() + read > maxBytes) {
@@ -391,7 +468,106 @@ class SmbShareClient(
         }
     }
 
-    private inline fun <T> withDiskShare(
+    /**
+     * 탐색용 영구 SMB Connection/Session/DiskShare 풀에서 작업을 실행합니다.
+     * 유휴 타임아웃 등으로 기존 연결이 끊겨 있으면 풀을 폐기하고 1회 자동 재연결 후 재시도합니다.
+     */
+    private fun <T> withPooledDiskShare(
+        host: String,
+        auth: SmbAuthConfig,
+        shareName: String,
+        block: (DiskShare) -> T
+    ): T {
+        if (host.isBlank()) {
+            throw IllegalArgumentException("SMB 서버 호스트가 설정되지 않았습니다.")
+        }
+        if (shareName.isBlank()) {
+            throw IllegalArgumentException("공유 폴더 이름이 비어 있습니다.")
+        }
+
+        synchronized(poolLock) {
+            var lastError: Throwable? = null
+            for (attempt in 0..1) {
+                try {
+                    val share = getOrOpenPooledShareLocked(host, auth, shareName)
+                    return block(share)
+                } catch (e: Exception) {
+                    lastError = e
+                    // 사용자 입력/비즈니스 로직 예외는 재연결 없이 즉시 반환
+                    if (e is IllegalArgumentException || e is IllegalStateException) {
+                        throw e
+                    }
+                    // 전송/세션 끊김 오류 시 풀을 초기화하고 1회 재시도
+                    pooledContext?.closeQuietly()
+                    pooledContext = null
+                    if (attempt == 1) {
+                        throw e
+                    }
+                }
+            }
+            throw lastError ?: IllegalStateException("SMB 연결에 실패했습니다.")
+        }
+    }
+
+    private fun ensurePooledContextLocked(
+        host: String,
+        auth: SmbAuthConfig
+    ): PooledSmbContext {
+        val proxy = NetworkProxyManager.proxyConfig.value
+        val desiredKey = PoolKey(
+            host = host,
+            username = auth.username,
+            passwordHash = auth.password.hashCode(),
+            useGuest = auth.useGuest,
+            proxySignature = "${proxy.isActive}:${proxy.host}:${proxy.port}"
+        )
+
+        val existing = pooledContext
+        if (existing != null && existing.key == desiredKey && existing.isHealthy()) {
+            return existing
+        }
+
+        existing?.closeQuietly()
+        val client = SMBClient(buildInteractiveSmbConfig())
+        return try {
+            val connection = client.connect(host, DEFAULT_SMB_PORT)
+            val session = connection.authenticate(auth.toSmbjAuthContext())
+            val created = PooledSmbContext(
+                key = desiredKey,
+                client = client,
+                connection = connection,
+                session = session
+            )
+            pooledContext = created
+            created
+        } catch (e: Exception) {
+            runCatching { client.close() }
+            pooledContext = null
+            throw e
+        }
+    }
+
+    private fun getOrOpenPooledShareLocked(
+        host: String,
+        auth: SmbAuthConfig,
+        shareName: String
+    ): DiskShare {
+        val ctx = ensurePooledContextLocked(host, auth)
+
+        val shareKey = shareName.lowercase()
+        val existingShare = ctx.shares[shareKey]
+        if (existingShare != null && runCatching { existingShare.isConnected }.getOrDefault(false)) {
+            return existingShare
+        }
+
+        existingShare?.let { runCatching { it.close() } }
+        val opened = ctx.session.connectShare(shareName) as? DiskShare
+            ?: throw IllegalStateException("'$shareName' 공유는 디스크 공유 형식이 아닙니다.")
+        ctx.shares[shareKey] = opened
+        return opened
+    }
+
+    private inline fun <T> withDedicatedDiskShare(
         host: String,
         auth: SmbAuthConfig,
         shareName: String,
